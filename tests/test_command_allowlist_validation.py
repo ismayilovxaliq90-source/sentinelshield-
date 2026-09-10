@@ -71,10 +71,16 @@ def test_executable_must_be_string(command):
     assert result.reason == "EXECUTABLE_MUST_BE_STRING"
 
 
+def test_empty_executable_is_rejected():
+    result = validate_command_allowlist([""])
+
+    assert result.valid is False
+    assert result.reason == "EXECUTABLE_MUST_NOT_BE_EMPTY"
+
+
 @pytest.mark.parametrize(
     "executable",
     [
-        "",
         "unknown-command",
         "bash",
         "sh",
