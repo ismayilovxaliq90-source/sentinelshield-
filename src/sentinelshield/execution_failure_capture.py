@@ -7,7 +7,7 @@ from typing import Any, Sequence
 
 
 class ExecutionFailureCaptureError(ValueError):
-    """Raised when failure-capture input is invalid."""
+    """Raised when execution-failure capture input is invalid."""
 
 
 VALID_FAILURE_CATEGORIES = frozenset(
@@ -25,10 +25,14 @@ VALID_FAILURE_CATEGORIES = frozenset(
 )
 
 
+_MAX_COMMAND_ARGUMENT_LENGTH = 1024
+_MAX_OUTPUT_LENGTH = 4096
+
+
 _SECRET_PATTERNS = (
     re.compile(
-        r"(?i)(password|passwd|pwd|token|secret|api[_-]?key|"
-        r"access[_-]?key|private[_-]?key)\s*[:=]\s*[^\s,;]+"
+        r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|"
+        r"access[_-]?key|private[_-]?key)\b\s*[:=]\s*[^\s,;]+"
     ),
     re.compile(
         r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"
@@ -39,7 +43,27 @@ _SECRET_PATTERNS = (
 )
 
 
-def sanitize_text(value: str, max_length: int = 4096) -> str:
+def _redact_secret(match: re.Match[str]) -> str:
+    value = match.group(0)
+
+    if "=" in value:
+        prefix, _ = value.split("=", 1)
+        return f"{prefix}=[REDACTED]"
+
+    if ":" in value:
+        prefix, _ = value.split(":", 1)
+        return f"{prefix}:[REDACTED]"
+
+    if value.lower().startswith("bearer "):
+        return "Bearer [REDACTED]"
+
+    return "[REDACTED]"
+
+
+def sanitize_text(
+    value: str,
+    max_length: int = _MAX_OUTPUT_LENGTH,
+) -> str:
     if not isinstance(value, str):
         raise ExecutionFailureCaptureError(
             "text value must be a string"
@@ -54,7 +78,7 @@ def sanitize_text(value: str, max_length: int = 4096) -> str:
 
     for pattern in _SECRET_PATTERNS:
         sanitized = pattern.sub(
-            lambda match: _redact_match(match.group(0)),
+            _redact_secret,
             sanitized,
         )
 
@@ -64,27 +88,12 @@ def sanitize_text(value: str, max_length: int = 4096) -> str:
     return sanitized
 
 
-def _redact_match(value: str) -> str:
-    if "=" in value:
-        prefix, _ = value.split("=", 1)
-        return prefix + "=[REDACTED]"
-
-    if ":" in value:
-        prefix, _ = value.split(":", 1)
-        return prefix + ":[REDACTED]"
-
-    if value.lower().startswith("bearer "):
-        return "Bearer [REDACTED]"
-
-    return "[REDACTED]"
-
-
 def sanitize_command(
     command: Sequence[str],
 ) -> tuple[str, ...]:
     if isinstance(command, (str, bytes)):
         raise ExecutionFailureCaptureError(
-            "command must be a sequence"
+            "command must be a sequence, not a string"
         )
 
     if not isinstance(command, Sequence):
@@ -99,7 +108,7 @@ def sanitize_command(
             "command must not be empty"
         )
 
-    result: list[str] = []
+    sanitized: list[str] = []
 
     for argument in normalized:
         if not isinstance(argument, str):
@@ -112,23 +121,30 @@ def sanitize_command(
                 "NULL character is not allowed"
             )
 
-        result.append(sanitize_text(argument, 1024))
+        sanitized.append(
+            sanitize_text(
+                argument,
+                _MAX_COMMAND_ARGUMENT_LENGTH,
+            )
+        )
 
-    return tuple(result)
+    return tuple(sanitized)
 
 
-def _exception_category(exception: BaseException) -> str:
+def _classify_exception(
+    exception: BaseException,
+) -> str:
     if isinstance(exception, FileNotFoundError):
         return "COMMAND_NOT_FOUND"
 
     if isinstance(exception, PermissionError):
         return "PERMISSION_ERROR"
 
-    if isinstance(exception, OSError):
-        return "EXECUTION_ERROR"
-
     if isinstance(exception, TimeoutError):
         return "TIMEOUT"
+
+    if isinstance(exception, OSError):
+        return "EXECUTION_ERROR"
 
     return "UNEXPECTED_EXCEPTION"
 
@@ -151,34 +167,67 @@ class ExecutionFailure:
 
         if not isinstance(self.message, str):
             raise ExecutionFailureCaptureError(
-                "failure message must be a string"
+                "message must be a string"
             )
 
         if self.exception_type is not None:
             if not isinstance(self.exception_type, str):
                 raise ExecutionFailureCaptureError(
-                    "exception_type must be a string or None"
+                    "exception_type must be string or None"
                 )
 
         if self.return_code is not None:
             if type(self.return_code) is not int:
                 raise ExecutionFailureCaptureError(
-                    "return_code must be an integer or None"
+                    "return_code must be int or None"
                 )
 
         if type(self.timed_out) is not bool:
             raise ExecutionFailureCaptureError(
-                "timed_out must be boolean"
+                "timed_out must be bool"
             )
 
         if type(self.resource_limit_exceeded) is not bool:
             raise ExecutionFailureCaptureError(
-                "resource_limit_exceeded must be boolean"
+                "resource_limit_exceeded must be bool"
             )
 
         if type(self.terminated) is not bool:
             raise ExecutionFailureCaptureError(
-                "terminated must be boolean"
+                "terminated must be bool"
+            )
+
+        if self.category == "TIMEOUT" and not self.timed_out:
+            raise ExecutionFailureCaptureError(
+                "TIMEOUT category requires timed_out=True"
+            )
+
+        if (
+            self.category == "RESOURCE_LIMIT"
+            and not self.resource_limit_exceeded
+        ):
+            raise ExecutionFailureCaptureError(
+                "RESOURCE_LIMIT category requires "
+                "resource_limit_exceeded=True"
+            )
+
+        if (
+            self.category == "TERMINATED"
+            and not self.terminated
+        ):
+            raise ExecutionFailureCaptureError(
+                "TERMINATED category requires terminated=True"
+            )
+
+        if (
+            self.category == "NON_ZERO_EXIT"
+            and (
+                self.return_code is None
+                or self.return_code == 0
+            )
+        ):
+            raise ExecutionFailureCaptureError(
+                "NON_ZERO_EXIT requires non-zero return code"
             )
 
     @property
@@ -196,7 +245,9 @@ class ExecutionFailure:
             ),
             "return_code": self.return_code,
             "timed_out": self.timed_out,
-            "resource_limit_exceeded": self.resource_limit_exceeded,
+            "resource_limit_exceeded": (
+                self.resource_limit_exceeded
+            ),
             "terminated": self.terminated,
             "failed": self.failed,
         }
@@ -208,6 +259,33 @@ class ExecutionFailureResult:
     failure: ExecutionFailure
     stdout: str
     stderr: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command, tuple):
+            raise ExecutionFailureCaptureError(
+                "command must be a tuple"
+            )
+
+        for argument in self.command:
+            if not isinstance(argument, str):
+                raise ExecutionFailureCaptureError(
+                    "command arguments must be strings"
+                )
+
+        if not isinstance(self.failure, ExecutionFailure):
+            raise ExecutionFailureCaptureError(
+                "failure must be ExecutionFailure"
+            )
+
+        if not isinstance(self.stdout, str):
+            raise ExecutionFailureCaptureError(
+                "stdout must be a string"
+            )
+
+        if not isinstance(self.stderr, str):
+            raise ExecutionFailureCaptureError(
+                "stderr must be a string"
+            )
 
     @property
     def failed(self) -> bool:
@@ -242,20 +320,26 @@ def capture_execution_failure(
 ) -> ExecutionFailureResult:
     normalized_command = sanitize_command(command)
 
-    if return_code is not None and type(return_code) is not int:
+    if return_code is not None:
+        if type(return_code) is not int:
+            raise ExecutionFailureCaptureError(
+                "return_code must be int or None"
+            )
+
+    if type(timed_out) is not bool:
         raise ExecutionFailureCaptureError(
-            "return_code must be an integer or None"
+            "timed_out must be bool"
         )
 
-    for name, value in (
-        ("timed_out", timed_out),
-        ("resource_limit_exceeded", resource_limit_exceeded),
-        ("terminated", terminated),
-    ):
-        if type(value) is not bool:
-            raise ExecutionFailureCaptureError(
-                f"{name} must be boolean"
-            )
+    if type(resource_limit_exceeded) is not bool:
+        raise ExecutionFailureCaptureError(
+            "resource_limit_exceeded must be bool"
+        )
+
+    if type(terminated) is not bool:
+        raise ExecutionFailureCaptureError(
+            "terminated must be bool"
+        )
 
     if not isinstance(stdout, str):
         raise ExecutionFailureCaptureError(
@@ -274,14 +358,14 @@ def capture_execution_failure(
     elif terminated:
         category = "TERMINATED"
     elif exception is not None:
-        category = _exception_category(exception)
+        category = _classify_exception(exception)
     elif return_code is not None and return_code != 0:
         category = "NON_ZERO_EXIT"
     else:
         category = "NONE"
 
     if exception is not None:
-        message = str(exception)
+        message = sanitize_text(str(exception))
         exception_type = type(exception).__name__
     elif category == "TIMEOUT":
         message = "execution timed out"
@@ -294,7 +378,7 @@ def capture_execution_failure(
         exception_type = None
     elif category == "NON_ZERO_EXIT":
         message = (
-            f"execution returned non-zero exit code: "
+            "execution returned non-zero exit code: "
             f"{return_code}"
         )
         exception_type = None
@@ -304,7 +388,7 @@ def capture_execution_failure(
 
     failure = ExecutionFailure(
         category=category,
-        message=sanitize_text(message),
+        message=message,
         exception_type=(
             sanitize_text(exception_type)
             if exception_type is not None
@@ -371,18 +455,20 @@ def validate_execution_failure(
 
     failure = result.failure
 
+    if failure.category not in VALID_FAILURE_CATEGORIES:
+        return False
+
     if failure.category == "NONE":
-        if failure.failed:
-            return False
-
-        if (
-            failure.timed_out
-            or failure.resource_limit_exceeded
-            or failure.terminated
-        ):
-            return False
-
         if failure.return_code not in (None, 0):
+            return False
+
+        if failure.timed_out:
+            return False
+
+        if failure.resource_limit_exceeded:
+            return False
+
+        if failure.terminated:
             return False
 
     if failure.category == "TIMEOUT":
@@ -398,15 +484,17 @@ def validate_execution_failure(
             return False
 
     if failure.category == "NON_ZERO_EXIT":
-        if failure.return_code in (None, 0):
-            return False
-
-    if failure.exception_type is not None:
-        if not failure.exception_type:
+        if (
+            failure.return_code is None
+            or failure.return_code == 0
+        ):
             return False
 
     try:
-        json.dumps(result.to_dict(), sort_keys=True)
+        json.dumps(
+            result.to_dict(),
+            sort_keys=True,
+        )
     except (TypeError, ValueError):
         return False
 

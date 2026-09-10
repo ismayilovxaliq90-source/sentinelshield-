@@ -27,38 +27,74 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify project layout and import
+      - name: Verify project structure
+        shell: bash
         run: |
           set -euo pipefail
 
           test -d "$GITHUB_WORKSPACE/src/sentinelshield"
           test -f "$GITHUB_WORKSPACE/src/sentinelshield/execution_failure_capture.py"
           test -f "$GITHUB_WORKSPACE/tests/test_execution_failure_capture.py"
+          test -f "$GITHUB_WORKSPACE/src/sentinelshield/execution_telemetry.py"
+          test -f "$GITHUB_WORKSPACE/src/sentinelshield/execution_timeout_enforcement.py"
+          test -f "$GITHUB_WORKSPACE/src/sentinelshield/resource_limit_enforcement.py"
+
+      - name: Compile TASK 213 and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m py_compile \
+            "$GITHUB_WORKSPACE/src/sentinelshield/execution_failure_capture.py" \
+            "$GITHUB_WORKSPACE/src/sentinelshield/execution_telemetry.py" \
+            "$GITHUB_WORKSPACE/src/sentinelshield/execution_timeout_enforcement.py" \
+            "$GITHUB_WORKSPACE/src/sentinelshield/resource_limit_enforcement.py"
+
+      - name: Verify imports
+        shell: bash
+        run: |
+          set -euo pipefail
 
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
-          python -c "import sentinelshield; print(sentinelshield.__file__)"
-          python -c "from sentinelshield.execution_failure_capture import capture_execution_failure"
+          python -c "import sentinelshield"
+          python -c "import sentinelshield.execution_failure_capture"
+          python -c "import sentinelshield.execution_telemetry"
+          python -c "import sentinelshield.execution_timeout_enforcement"
+          python -c "import sentinelshield.resource_limit_enforcement"
+
+          echo "TASK 213 IMPORT VALIDATION: PASS"
 
       - name: Install pytest
-        run: |
-          python -m pip install --disable-pip-version-check --no-input pytest
-
-      - name: Run TASK 213 unit tests
+        shell: bash
         run: |
           set -euo pipefail
+
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            pytest
+
+      - name: Run TASK 213 unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python -m pytest \
             -q \
             "$GITHUB_WORKSPACE/tests/test_execution_failure_capture.py"
 
-      - name: Live failure capture validation
+      - name: Live non-zero exit capture
+        shell: bash
         run: |
           set -euo pipefail
+
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python - <<'PY'
+          import subprocess
           import sys
 
           from sentinelshield.execution_failure_capture import (
@@ -66,31 +102,46 @@ jobs:
               validate_execution_failure,
           )
 
+          completed = subprocess.run(
+              [
+                  sys.executable,
+                  "-c",
+                  "import sys; sys.exit(23)",
+              ],
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+
           result = capture_execution_result(
               [
                   sys.executable,
                   "-c",
-                  "import sys; sys.exit(17)",
+                  "import sys; sys.exit(23)",
               ],
-              return_code=17,
-              stderr="intentional test failure",
+              return_code=completed.returncode,
+              stdout=completed.stdout,
+              stderr=completed.stderr,
           )
 
-          print("category:", result.failure.category)
           print("return_code:", result.failure.return_code)
+          print("category:", result.failure.category)
           print("failed:", result.failed)
 
+          assert completed.returncode == 23
           assert result.failure.category == "NON_ZERO_EXIT"
-          assert result.failure.return_code == 17
+          assert result.failure.return_code == 23
           assert result.failed is True
           assert validate_execution_failure(result)
 
-          print("TASK 213 LIVE VALIDATION: PASS")
+          print("TASK 213 LIVE NON-ZERO EXIT: PASS")
           PY
 
-      - name: Live exception capture validation
+      - name: Live exception capture
+        shell: bash
         run: |
           set -euo pipefail
+
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python - <<'PY'
@@ -99,22 +150,60 @@ jobs:
               validate_execution_failure,
           )
 
-          result = capture_exception(
-              ["sentinelshield-test-command"],
-              RuntimeError("intentional exception"),
-          )
+          try:
+              raise RuntimeError(
+                  "intentional TASK 213 validation failure"
+              )
+          except RuntimeError as error:
+              result = capture_exception(
+                  ["sentinelshield-test"],
+                  error,
+              )
 
           print("category:", result.failure.category)
-          print("exception_type:", result.failure.exception_type)
+          print(
+              "exception_type:",
+              result.failure.exception_type,
+          )
 
           assert result.failure.category == "UNEXPECTED_EXCEPTION"
           assert result.failure.exception_type == "RuntimeError"
+          assert result.failed is True
           assert validate_execution_failure(result)
 
-          print("TASK 213 EXCEPTION VALIDATION: PASS")
+          print("TASK 213 LIVE EXCEPTION CAPTURE: PASS")
+          PY
+
+      - name: Live secret protection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          from sentinelshield.execution_failure_capture import (
+              capture_execution_result,
+          )
+
+          secret = "super-secret-value"
+
+          result = capture_execution_result(
+              ["tool", f"--token={secret}"],
+              return_code=1,
+              stderr=f"password={secret}",
+          )
+
+          serialized = result.to_json()
+
+          assert secret not in serialized
+          assert "[REDACTED]" in serialized
+
+          print("TASK 213 SECRET PROTECTION: PASS")
           PY
 
       - name: Verify no bytecode changes
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -126,6 +215,9 @@ jobs:
 
           echo "TASK 213 BYTECODE CHECK: PASS"
 
-      - name: Final status
+      - name: Final TASK 213 status
+        shell: bash
         run: |
+          set -euo pipefail
+
           echo "TASK 213 SERVER VALIDATION COMPLETE"
