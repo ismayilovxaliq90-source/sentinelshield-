@@ -58,8 +58,11 @@ def commit_all(path: Path) -> None:
 def test_clean_repository_passes(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
-    target = repo / "package.json"
-    target.write_text('{"version": 1}\n', encoding="utf-8")
+    (repo / "package.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
     commit_all(repo)
 
     result = enforce_remediation_scope(
@@ -77,10 +80,18 @@ def test_expected_file_change_is_in_scope(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
     target = repo / "package.json"
-    target.write_text('{"version": 1}\n', encoding="utf-8")
+
+    target.write_text(
+        '{"version": 1}\n',
+        encoding="utf-8",
+    )
+
     commit_all(repo)
 
-    target.write_text('{"version": 2}\n', encoding="utf-8")
+    target.write_text(
+        '{"version": 2}\n',
+        encoding="utf-8",
+    )
 
     result = enforce_remediation_scope(
         repo,
@@ -93,16 +104,25 @@ def test_expected_file_change_is_in_scope(tmp_path):
     assert result.accepted_changes[0].status == "M"
 
 
-def test_nested_file_is_in_scope_when_directory_is_approved(tmp_path):
+def test_directory_scope_accepts_nested_file(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
     directory = repo / "service"
     directory.mkdir()
+
     target = directory / "package-lock.json"
-    target.write_text("baseline\n", encoding="utf-8")
+
+    target.write_text(
+        "baseline\n",
+        encoding="utf-8",
+    )
+
     commit_all(repo)
 
-    target.write_text("changed\n", encoding="utf-8")
+    target.write_text(
+        "changed\n",
+        encoding="utf-8",
+    )
 
     result = enforce_remediation_scope(
         repo,
@@ -113,25 +133,65 @@ def test_nested_file_is_in_scope_when_directory_is_approved(tmp_path):
     assert result.out_of_scope_changes == ()
 
 
-def test_unexpected_file_fails_scope(tmp_path):
+def test_directory_scope_does_not_match_sibling(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
-    (repo / "package.json").write_text(
-        '{"version": 1}\n",
-        encoding="utf-8",
-    )
-    (repo / "README.md").write_text(
+    service = repo / "service"
+    service.mkdir()
+
+    sibling = repo / "service-other"
+    sibling.mkdir()
+
+    target = sibling / "file.txt"
+
+    target.write_text(
         "baseline\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
-    (repo / "package.json").write_text(
-        '{"version": 2}\n",
+    target.write_text(
+        "changed\n",
         encoding="utf-8",
     )
 
-    (repo / "README.md").write_text(
+    result = enforce_remediation_scope(
+        repo,
+        ["service"],
+    )
+
+    assert result.in_scope is False
+    assert len(result.out_of_scope_changes) == 1
+    assert result.out_of_scope_changes[0].path == (
+        "service-other/file.txt"
+    )
+
+
+def test_unexpected_modified_file_fails(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+
+    manifest = repo / "package.json"
+    readme = repo / "README.md"
+
+    manifest.write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    readme.write_text(
+        "baseline\n",
+        encoding="utf-8",
+    )
+
+    commit_all(repo)
+
+    manifest.write_text(
+        '{"changed": true}\n',
+        encoding="utf-8",
+    )
+
+    readme.write_text(
         "unexpected\n",
         encoding="utf-8",
     )
@@ -154,6 +214,7 @@ def test_unexpected_new_file_fails(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     (repo / "unexpected.txt").write_text(
@@ -174,7 +235,12 @@ def test_unexpected_deleted_file_fails(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
     target = repo / "package.json"
-    target.write_text("{}\n", encoding="utf-8")
+
+    target.write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
     commit_all(repo)
 
     target.unlink()
@@ -195,6 +261,7 @@ def test_empty_scope_is_rejected(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     with pytest.raises(RemediationScopeError):
@@ -208,10 +275,14 @@ def test_string_scope_container_is_rejected(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     with pytest.raises(RemediationScopeError):
-        normalize_approved_scope(repo, "package.json")
+        normalize_approved_scope(
+            repo,
+            "package.json",
+        )
 
 
 def test_outside_repository_scope_is_rejected(tmp_path):
@@ -221,12 +292,16 @@ def test_outside_repository_scope_is_rejected(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     outside = tmp_path / "outside.txt"
 
     with pytest.raises(RemediationScopeError):
-        normalize_approved_scope(repo, [outside])
+        normalize_approved_scope(
+            repo,
+            [outside],
+        )
 
 
 def test_null_character_is_rejected(tmp_path):
@@ -236,6 +311,7 @@ def test_null_character_is_rejected(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     with pytest.raises(RemediationScopeError):
@@ -252,15 +328,20 @@ def test_scope_normalization_is_deterministic(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     (repo / "package-lock.json").write_text(
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     result = normalize_approved_scope(
         repo,
-        ["./package-lock.json", "package.json"],
+        [
+            "./package-lock.json",
+            "package.json",
+        ],
     )
 
     assert result == (
@@ -276,6 +357,7 @@ def test_result_serialization(tmp_path):
         "{}\n",
         encoding="utf-8",
     )
+
     commit_all(repo)
 
     (repo / "package.json").write_text(

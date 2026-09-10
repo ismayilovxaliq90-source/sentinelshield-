@@ -8,7 +8,7 @@ import subprocess
 
 
 class RemediationScopeError(Exception):
-    """Raised when remediation scope validation cannot be completed."""
+    """Raised when remediation scope validation fails."""
 
 
 @dataclass(frozen=True)
@@ -28,12 +28,12 @@ class RemediationScopeResult:
     repository_root: str
     valid: bool
     in_scope: bool
-    approved_scope: tuple[str, ...] = ()
-    accepted_changes: tuple[ScopeChange, ...] = ()
-    out_of_scope_changes: tuple[ScopeChange, ...] = ()
-    added_files: tuple[str, ...] = ()
-    modified_files: tuple[str, ...] = ()
-    deleted_files: tuple[str, ...] = ()
+    approved_scope: tuple[str, ...]
+    accepted_changes: tuple[ScopeChange, ...]
+    out_of_scope_changes: tuple[ScopeChange, ...]
+    added_files: tuple[str, ...]
+    modified_files: tuple[str, ...]
+    deleted_files: tuple[str, ...]
     reason: str | None = None
 
     @property
@@ -51,7 +51,8 @@ class RemediationScopeResult:
                 item.to_dict() for item in self.accepted_changes
             ],
             "out_of_scope_changes": [
-                item.to_dict() for item in self.out_of_scope_changes
+                item.to_dict()
+                for item in self.out_of_scope_changes
             ],
             "added_files": list(self.added_files),
             "modified_files": list(self.modified_files),
@@ -60,13 +61,33 @@ class RemediationScopeResult:
         }
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True)
+        return json.dumps(
+            self.to_dict(),
+            sort_keys=True,
+        )
 
 
-def _validate_repository_root(repository_root: Path) -> Path:
+def _repository_root(repository_root: str | Path) -> Path:
+    if not isinstance(repository_root, (str, Path)):
+        raise RemediationScopeError(
+            "Repository root must be a string or Path"
+        )
+
+    raw = str(repository_root).strip()
+
+    if not raw:
+        raise RemediationScopeError(
+            "Repository root cannot be empty"
+        )
+
+    if "\x00" in raw:
+        raise RemediationScopeError(
+            "NULL character is not allowed"
+        )
+
     try:
-        root = Path(repository_root).expanduser().resolve()
-    except (OSError, RuntimeError, TypeError) as exc:
+        root = Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
         raise RemediationScopeError(
             "Unable to resolve repository root"
         ) from exc
@@ -89,8 +110,8 @@ def _validate_repository_root(repository_root: Path) -> Path:
     return root
 
 
-def _normalize_relative_path(
-    repository_root: Path,
+def _normalize_scope_path(
+    root: Path,
     value: str | Path,
 ) -> str:
     if not isinstance(value, (str, Path)):
@@ -112,13 +133,18 @@ def _normalize_relative_path(
 
     candidate = Path(raw)
 
-    if candidate.is_absolute():
-        resolved = candidate.expanduser().resolve()
-    else:
-        resolved = (repository_root / candidate).resolve()
+    try:
+        if candidate.is_absolute():
+            resolved = candidate.expanduser().resolve()
+        else:
+            resolved = (root / candidate).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise RemediationScopeError(
+            f"Unable to resolve scope path: {value}"
+        ) from exc
 
     try:
-        relative = resolved.relative_to(repository_root)
+        relative = resolved.relative_to(root)
     except ValueError as exc:
         raise RemediationScopeError(
             f"Scope path is outside repository: {value}"
@@ -126,26 +152,38 @@ def _normalize_relative_path(
 
     if relative == Path("."):
         raise RemediationScopeError(
-            "Repository root itself cannot be an approved remediation path"
+            "Repository root cannot be remediation scope"
         )
 
     return relative.as_posix()
 
 
 def normalize_approved_scope(
-    repository_root: Path,
+    repository_root: str | Path,
     approved_paths: Iterable[str | Path],
 ) -> tuple[str, ...]:
-    root = _validate_repository_root(repository_root)
+    root = _repository_root(repository_root)
 
     if isinstance(approved_paths, (str, Path)):
         raise RemediationScopeError(
-            "Approved scope must be an iterable of paths, not one path"
+            "Approved scope must be an iterable of paths"
+        )
+
+    try:
+        items = list(approved_paths)
+    except TypeError as exc:
+        raise RemediationScopeError(
+            "Approved scope must be iterable"
+        ) from exc
+
+    if not items:
+        raise RemediationScopeError(
+            "Approved remediation scope cannot be empty"
         )
 
     normalized = {
-        _normalize_relative_path(root, item)
-        for item in approved_paths
+        _normalize_scope_path(root, item)
+        for item in items
     }
 
     if not normalized:
@@ -156,14 +194,21 @@ def normalize_approved_scope(
     return tuple(sorted(normalized))
 
 
-def _is_within_scope(path: str, scope_path: str) -> bool:
-    if path == scope_path:
-        return True
+def _path_in_scope(
+    changed_path: str,
+    scope_path: str,
+) -> bool:
+    return (
+        changed_path == scope_path
+        or changed_path.startswith(
+            scope_path.rstrip("/") + "/"
+        )
+    )
 
-    return path.startswith(scope_path.rstrip("/") + "/")
 
-
-def _run_git_status(repository_root: Path) -> list[ScopeChange]:
+def _git_status(
+    root: Path,
+) -> tuple[ScopeChange, ...]:
     try:
         completed = subprocess.run(
             [
@@ -172,7 +217,7 @@ def _run_git_status(repository_root: Path) -> list[ScopeChange]:
                 "--porcelain=v1",
                 "--untracked-files=all",
             ],
-            cwd=repository_root,
+            cwd=root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -189,7 +234,8 @@ def _run_git_status(repository_root: Path) -> list[ScopeChange]:
 
     if completed.returncode != 0:
         raise RemediationScopeError(
-            completed.stderr.strip() or "Git status failed"
+            completed.stderr.strip()
+            or "Git status failed"
         )
 
     changes: list[ScopeChange] = []
@@ -207,17 +253,25 @@ def _run_git_status(repository_root: Path) -> list[ScopeChange]:
         path_text = line[3:]
 
         if "->" in path_text:
-            old_path, new_path = [
-                item.strip()
-                for item in path_text.split("->", 1)
-            ]
+            old_path, new_path = (
+                part.strip()
+                for part in path_text.split("->", 1)
+            )
 
             changes.append(
-                ScopeChange(path=old_path, status="D")
+                ScopeChange(
+                    path=Path(old_path).as_posix(),
+                    status="D",
+                )
             )
+
             changes.append(
-                ScopeChange(path=new_path, status="A")
+                ScopeChange(
+                    path=Path(new_path).as_posix(),
+                    status="A",
+                )
             )
+
             continue
 
         if status == "??":
@@ -240,49 +294,59 @@ def _run_git_status(repository_root: Path) -> list[ScopeChange]:
             )
         )
 
-    return sorted(changes, key=lambda item: item.path)
+    return tuple(
+        sorted(
+            changes,
+            key=lambda item: item.path,
+        )
+    )
 
 
 def _validate_change_paths(
-    repository_root: Path,
+    root: Path,
     changes: Sequence[ScopeChange],
 ) -> None:
     for change in changes:
-        candidate = (repository_root / change.path).resolve()
+        candidate = root / change.path
 
         try:
-            candidate.relative_to(repository_root)
-        except ValueError as exc:
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError) as exc:
             raise RemediationScopeError(
                 f"Git change is outside repository: {change.path}"
             ) from exc
 
 
 def enforce_remediation_scope(
-    repository_root: Path,
+    repository_root: str | Path,
     approved_paths: Iterable[str | Path],
 ) -> RemediationScopeResult:
-    root = _validate_repository_root(repository_root)
+    root = _repository_root(repository_root)
 
     scope = normalize_approved_scope(
         root,
         approved_paths,
     )
 
-    changes = _run_git_status(root)
-    _validate_change_paths(root, changes)
+    changes = _git_status(root)
+
+    _validate_change_paths(
+        root,
+        changes,
+    )
 
     accepted: list[ScopeChange] = []
-    out_of_scope: list[ScopeChange] = []
+    unexpected: list[ScopeChange] = []
 
     for change in changes:
         if any(
-            _is_within_scope(change.path, scope_path)
+            _path_in_scope(change.path, scope_path)
             for scope_path in scope
         ):
             accepted.append(change)
         else:
-            out_of_scope.append(change)
+            unexpected.append(change)
 
     added = tuple(
         sorted(
@@ -308,21 +372,21 @@ def enforce_remediation_scope(
         )
     )
 
-    passed = not out_of_scope
+    in_scope = not unexpected
 
     return RemediationScopeResult(
         repository_root=str(root),
         valid=True,
-        in_scope=passed,
+        in_scope=in_scope,
         approved_scope=scope,
         accepted_changes=tuple(accepted),
-        out_of_scope_changes=tuple(out_of_scope),
+        out_of_scope_changes=tuple(unexpected),
         added_files=added,
         modified_files=modified,
         deleted_files=deleted,
         reason=(
             None
-            if passed
+            if in_scope
             else "REMEDIATION_SCOPE_VIOLATION"
         ),
     )
@@ -331,30 +395,26 @@ def enforce_remediation_scope(
 def validate_remediation_scope_result(
     result: RemediationScopeResult,
 ) -> bool:
-    if not isinstance(result, RemediationScopeResult):
+    if not isinstance(
+        result,
+        RemediationScopeResult,
+    ):
         raise RemediationScopeError(
             "Invalid remediation scope result"
         )
 
-    if not result.valid:
-        return False
-
-    if result.out_of_scope_changes:
-        return False
-
-    return result.in_scope
+    return (
+        result.valid
+        and result.in_scope
+        and not result.out_of_scope_changes
+    )
 
 
 def verify_remediation_scope(
-    repository_root: Path,
+    repository_root: str | Path,
     approved_paths: Iterable[str | Path],
 ) -> RemediationScopeResult:
-    result = enforce_remediation_scope(
-        repository_root=repository_root,
-        approved_paths=approved_paths,
+    return enforce_remediation_scope(
+        repository_root,
+        approved_paths,
     )
-
-    if not validate_remediation_scope_result(result):
-        return result
-
-    return result

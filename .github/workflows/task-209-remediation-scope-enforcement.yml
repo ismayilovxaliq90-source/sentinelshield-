@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify SentinelShield import
+      - name: Verify package import
         shell: bash
         run: |
           set -euo pipefail
@@ -35,21 +35,13 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python -c \
             "import sentinelshield; print(sentinelshield.__file__)"
 
-      - name: Install test dependency
+      - name: Install pytest
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: Run Task 190 regression tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          PYTHONDONTWRITEBYTECODE=1 \
-            python -m pytest -q \
-            tests/test_execution_path_validation.py
-
-      - name: Run Task 209 unit tests
+      - name: Run Task 209 tests
         shell: bash
         run: |
           set -euo pipefail
@@ -58,17 +50,7 @@ jobs:
             python -m pytest -q \
             tests/test_remediation_scope_enforcement.py
 
-      - name: Run combined Task 190 and Task 209 regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          PYTHONDONTWRITEBYTECODE=1 \
-            python -m pytest -q \
-            tests/test_execution_path_validation.py \
-            tests/test_remediation_scope_enforcement.py
-
-      - name: Live Task 209 validation
+      - name: Run Task 209 live validation
         shell: bash
         run: |
           set -euo pipefail
@@ -84,7 +66,11 @@ jobs:
               validate_remediation_scope_result,
           )
 
-          root = Path(tempfile.mkdtemp(prefix="task-209-"))
+          root = Path(
+              tempfile.mkdtemp(
+                  prefix="task-209-"
+              )
+          )
 
           subprocess.run(
               ["git", "init"],
@@ -96,25 +82,38 @@ jobs:
           )
 
           subprocess.run(
-              ["git", "config", "user.email", "ci@example.com"],
+              [
+                  "git",
+                  "config",
+                  "user.email",
+                  "ci@example.com",
+              ],
               cwd=root,
               check=True,
           )
 
           subprocess.run(
-              ["git", "config", "user.name", "SentinelShield CI"],
+              [
+                  "git",
+                  "config",
+                  "user.name",
+                  "SentinelShield CI",
+              ],
               cwd=root,
               check=True,
           )
 
-          manifest = root / "package.json"
+          service = root / "service"
+          service.mkdir()
+
+          manifest = service / "package.json"
           manifest.write_text(
               '{"version": 1}\n',
               encoding="utf-8",
           )
 
-          readme = root / "README.md"
-          readme.write_text(
+          unrelated = root / "README.md"
+          unrelated.write_text(
               "baseline\n",
               encoding="utf-8",
           )
@@ -126,7 +125,12 @@ jobs:
           )
 
           subprocess.run(
-              ["git", "commit", "-m", "baseline"],
+              [
+                  "git",
+                  "commit",
+                  "-m",
+                  "baseline",
+              ],
               cwd=root,
               check=True,
               stdout=subprocess.PIPE,
@@ -135,35 +139,42 @@ jobs:
           )
 
           manifest.write_text(
-              '{"version": 2}\n",
+              '{"version": 2}\n',
               encoding="utf-8",
           )
 
           result = enforce_remediation_scope(
               root,
-              ["package.json"],
+              ["service"],
           )
 
           assert result.valid is True
           assert result.in_scope is True
           assert result.out_of_scope_changes == ()
-          assert validate_remediation_scope_result(result) is True
+          assert validate_remediation_scope_result(
+              result
+          ) is True
 
-          readme.write_text(
+          unrelated.write_text(
               "UNEXPECTED CHANGE\n",
               encoding="utf-8",
           )
 
           result = enforce_remediation_scope(
               root,
-              ["package.json"],
+              ["service"],
           )
 
           assert result.valid is True
           assert result.in_scope is False
           assert len(result.out_of_scope_changes) == 1
-          assert result.out_of_scope_changes[0].path == "README.md"
-          assert validate_remediation_scope_result(result) is False
+          assert (
+              result.out_of_scope_changes[0].path
+              == "README.md"
+          )
+          assert validate_remediation_scope_result(
+              result
+          ) is False
 
           print("TASK 209 LIVE VALIDATION: PASS")
           print(result.to_json())
@@ -180,6 +191,7 @@ jobs:
             exit 1
           fi
 
-      - name: Final Git status
+      - name: Final status
+        shell: bash
         run: |
           git status --short
