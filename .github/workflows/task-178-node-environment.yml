@@ -1,0 +1,83 @@
+name: TASK 178 - Node Environment Validation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-178:
+    name: TASK 178 - Node Environment Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Validate Node environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node --version
+          npm --version
+
+          PYTHON_BIN="python3"
+
+          if [ ! -x "$(command -v "$PYTHON_BIN")" ]; then
+            echo "FAIL: python3 is not available on GitHub runner"
+            exit 1
+          fi
+
+          "$PYTHON_BIN" --version
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          "$PYTHON_BIN" scripts/task_178_validate_node_environment.py
+
+      - name: Run Task 178 unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          "$HOME/.local/bin/pytest" \
+            tests/test_node_environment_validation.py \
+            -q
+
+      - name: Upload Task 178 evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/task-178
+
+          {
+            echo "TASK=178"
+            echo "NAME=Node Environment Validation"
+            echo "RUNNER=$RUNNER_OS"
+            echo "NODE=$(node --version)"
+            echo "NPM=$(npm --version)"
+            echo "STATUS=$([[ '${{ job.status }}' == 'success' ]] && echo PASS || echo FAIL)"
+          } > artifacts/task-178/execution-evidence.txt
+
+      - name: Publish Task 178 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-178-node-environment-evidence
+          path: artifacts/task-178/
