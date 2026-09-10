@@ -1,0 +1,133 @@
+name: Task 188 - Command Allowlist Validation
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  task-188:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify source import path
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.command_allowlist_validation"
+
+      - name: Run Task 188 tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_command_allowlist_validation.py
+
+      - name: Live allowlist validation
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          from sentinelshield.command_allowlist_validation import (
+              CommandAllowlistPolicy,
+              validate_command_allowlist,
+          )
+
+          policy = CommandAllowlistPolicy.from_iterable(
+              {"git", "python3", "node"}
+          )
+
+          allowed = validate_command_allowlist(
+              ["git", "status"],
+              policy,
+          )
+
+          denied = validate_command_allowlist(
+              ["curl", "https://example.com"],
+              policy,
+          )
+
+          path_denied = validate_command_allowlist(
+              ["/usr/bin/git", "status"],
+              policy,
+          )
+
+          shell_denied = validate_command_allowlist(
+              ["git;rm", "-rf"],
+              policy,
+          )
+
+          print("=== TASK 188 LIVE VALIDATION ===")
+          print("allowed:", allowed.to_dict())
+          print("denied:", denied.to_dict())
+          print("path_denied:", path_denied.to_dict())
+          print("shell_denied:", shell_denied.to_dict())
+
+          if not allowed.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: explicitly allowlisted command was rejected"
+              )
+
+          if denied.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: non-allowlisted command was accepted"
+              )
+
+          if path_denied.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: path-qualified executable was accepted"
+              )
+
+          if shell_denied.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: shell syntax was accepted as executable"
+              )
+
+          print("TASK 188 PASS: command allowlist enforced")
+          PY
+
+      - name: Verify no Python bytecode changes
+        run: |
+          if git status --porcelain=v1 --untracked-files=all -- \
+              '*.pyc' '*.pyo' | grep -q .; then
+            echo "TASK 188 FAIL: Python bytecode changes detected"
+            git status --short
+            exit 1
+          fi
+
+          echo "TASK 188 PASS: no Python bytecode changes"
+
+      - name: Verify repository changes are task-scoped
+        run: |
+          unexpected="$(git status --porcelain=v1 --untracked-files=all \
+            -- . ':!src/sentinelshield/command_allowlist_validation.py' \
+            ':!tests/test_command_allowlist_validation.py' \
+            ':!.github/workflows/task-188-command-allowlist-validation.yml' \
+            ':!*.pyc' ':!*.pyo')"
+
+          if [ -n "$unexpected" ]; then
+            echo "TASK 188 FAIL: unexpected repository changes detected"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+
+          echo "TASK 188 PASS: task-scoped validation complete"
