@@ -1,0 +1,157 @@
+name: Task 186 - Execution Isolation
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  task-186:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify package import
+        run: |
+          python -c "import sentinelshield; print(sentinelshield.__file__)"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run Task 186 tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_execution_isolation.py
+
+      - name: Validate Task 186 on isolated runner
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          import os
+          import stat
+          import tempfile
+
+          from sentinelshield.execution_isolation import (
+              execute_isolated,
+              prepare_execution_isolation,
+          )
+          from sentinelshield.temporary_workspace import (
+              cleanup_temporary_workspace,
+              prepare_temporary_workspace,
+          )
+
+          repository = os.getcwd()
+
+          with tempfile.TemporaryDirectory(
+              prefix="task-186-"
+          ) as base:
+
+              workspace = prepare_temporary_workspace(
+                  base_dir=base,
+                  repository_root=repository,
+              )
+
+              try:
+                  isolation = prepare_execution_isolation(
+                      workspace,
+                      [
+                          "/bin/pwd",
+                      ],
+                      environment={
+                          "PATH": "/usr/bin:/bin",
+                      },
+                  )
+
+                  assert isolation.shell is False
+                  assert isolation.start_new_session is True
+                  assert isolation.cwd == workspace.path.resolve()
+
+                  result = execute_isolated(
+                      isolation,
+                      timeout=10,
+                  )
+
+                  assert result.returncode == 0
+                  assert (
+                      result.stdout.strip()
+                      == str(workspace.path.resolve())
+                  )
+
+                  mode = stat.S_IMODE(
+                      os.stat(workspace.path).st_mode
+                  )
+                  assert mode == 0o700
+
+                  assert (
+                      "SECRET" not
+                      in isolation.environment_dict()
+                  )
+
+                  print("TASK 186 PASS")
+                  print(
+                      "isolated_cwd:",
+                      isolation.cwd,
+                  )
+                  print(
+                      "shell:",
+                      isolation.shell,
+                  )
+                  print(
+                      "start_new_session:",
+                      isolation.start_new_session,
+                  )
+                  print(
+                      "workspace_mode:",
+                      oct(mode),
+                  )
+
+              finally:
+                  cleanup_temporary_workspace(
+                      workspace
+                  )
+
+              assert not workspace.path.exists()
+
+          print("TASK 186 cleanup: PASS")
+          PY
+
+      - name: Verify no repository bytecode changes
+        run: |
+          if git status \
+            --porcelain=v1 \
+            --untracked-files=all \
+            -- '*.pyc' '*.pyo' | grep -q .; then
+
+            echo "TASK 186 FAIL: bytecode files changed or created"
+            git status \
+              --porcelain=v1 \
+              --untracked-files=all \
+              -- '*.pyc' '*.pyo'
+            exit 1
+          fi
+
+          echo "Bytecode state: CLEAN"
+
+      - name: Final repository validation
+        run: |
+          git diff --check
+          git status --short
