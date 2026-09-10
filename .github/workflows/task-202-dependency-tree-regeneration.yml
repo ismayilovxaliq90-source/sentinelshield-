@@ -1,0 +1,175 @@
+name: TASK 202 - Dependency Tree Regeneration
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/dependency_tree_regeneration.py"
+      - "tests/test_dependency_tree_regeneration.py"
+      - ".github/workflows/task-202-dependency-tree-regeneration.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/dependency_tree_regeneration.py"
+      - "tests/test_dependency_tree_regeneration.py"
+      - ".github/workflows/task-202-dependency-tree-regeneration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-202:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Verify import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.dependency_tree_regeneration"
+
+      - name: Run TASK 202 unit tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_dependency_tree_regeneration.py
+
+      - name: Create isolated npm dependency fixture
+        run: |
+          set -euo pipefail
+
+          rm -rf "$RUNNER_TEMP/task-202-fixture"
+          mkdir -p "$RUNNER_TEMP/task-202-fixture"
+          cd "$RUNNER_TEMP/task-202-fixture"
+
+          git init -q
+
+          cat > package.json <<'JSON'
+          {
+            "name": "sentinelshield-task-202-fixture",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "is-number": "7.0.0"
+            }
+          }
+          JSON
+
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Execute real TASK 202 dependency tree regeneration
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP/task-202-fixture"
+
+          cat > "$GITHUB_WORKSPACE/task_202_live_check.py" <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path.cwd().parents[0] / "sentinelshield" / "src"))
+
+          from sentinelshield.dependency_tree_regeneration import (
+              DependencyTreeRequest,
+              regenerate_dependency_tree,
+              validate_dependency_tree_result,
+          )
+
+          root = Path.cwd()
+
+          result = regenerate_dependency_tree(
+              DependencyTreeRequest(
+                  repository_root=root,
+                  manager="npm",
+                  timeout=60.0,
+              )
+          )
+
+          if not validate_dependency_tree_result(result):
+              print("TASK 202 FAIL: result validation failed")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          if not result.success:
+              print("TASK 202 FAIL: dependency tree regeneration failed")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          if not isinstance(result.tree, dict):
+              print("TASK 202 FAIL: npm tree is not a JSON object")
+              raise SystemExit(1)
+
+          if "dependencies" not in result.tree and "packages" not in result.tree:
+              print("TASK 202 FAIL: dependency tree has no dependency/package data")
+              raise SystemExit(1)
+
+          print("TASK 202 PASS")
+          print("manager:", result.manager)
+          print("returncode:", result.returncode)
+          print("tree_type:", type(result.tree).__name__)
+          PY
+
+          PYTHONPATH="$GITHUB_WORKSPACE/src" \
+          PYTHONDONTWRITEBYTECODE=1 \
+          python "$GITHUB_WORKSPACE/task_202_live_check.py"
+
+          rm -f "$GITHUB_WORKSPACE/task_202_live_check.py"
+
+      - name: Verify fixture state
+        run: |
+          set -euo pipefail
+
+          cd "$RUNNER_TEMP/task-202-fixture"
+
+          test -f package.json
+          test -f package-lock.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          lockfile = Path("package-lock.json")
+
+          if not lockfile.is_file():
+              raise SystemExit("TASK 202 FAIL: package-lock.json missing")
+
+          data = json.loads(lockfile.read_text(encoding="utf-8"))
+
+          if not isinstance(data, dict):
+              raise SystemExit("TASK 202 FAIL: lockfile is not a JSON object")
+
+          if "lockfileVersion" not in data:
+              raise SystemExit("TASK 202 FAIL: lockfileVersion missing")
+
+          print("lockfileVersion:", data["lockfileVersion"])
+          print("TASK 202 fixture verification PASS")
+          PY
+
+      - name: Verify no bytecode changes
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain=v1 | grep -E '(^|[[:space:]])[^[:space:]]*\.pyc$|__pycache__'; then
+            echo "TASK 202 FAIL: bytecode changes detected"
+            exit 1
+          fi
+
+          echo "TASK 202 bytecode verification PASS"
