@@ -40,6 +40,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
+      - name: Run Task 190 regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python -m pytest -q \
+            tests/test_execution_path_validation.py
+
       - name: Run Task 209 unit tests
         shell: bash
         run: |
@@ -47,6 +56,16 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
           PYTHONDONTWRITEBYTECODE=1 \
             python -m pytest -q \
+            tests/test_remediation_scope_enforcement.py
+
+      - name: Run combined Task 190 and Task 209 regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          PYTHONDONTWRITEBYTECODE=1 \
+            python -m pytest -q \
+            tests/test_execution_path_validation.py \
             tests/test_remediation_scope_enforcement.py
 
       - name: Live Task 209 validation
@@ -116,7 +135,7 @@ jobs:
           )
 
           manifest.write_text(
-              '{"version": 2}\n',
+              '{"version": 2}\n",
               encoding="utf-8",
           )
 

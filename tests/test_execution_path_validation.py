@@ -352,3 +352,23 @@ def test_pathlike_inputs_are_supported(tmp_path: Path):
     )
 
     assert result.allowed is True
+
+
+def test_candidate_length_error_takes_precedence_over_workspace_root_length(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    policy = ExecutionPathPolicy(
+        max_path_length=4,
+    )
+
+    result = validate_execution_path(
+        workspace,
+        "12345",
+        policy,
+    )
+
+    assert result.allowed is False
+    assert result.reason == "CANDIDATE_TOO_LONG"
