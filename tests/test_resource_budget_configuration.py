@@ -1,7 +1,8 @@
 import pytest
 
 from sentinelshield.resource_budget_configuration import (
-    ResourceBudgetConfigurationError,
+    ResourceBudget,
+    ResourceBudgetError,
     ResourceBudgetPolicy,
     configure_resource_budget,
     require_valid_resource_budget,
@@ -13,195 +14,260 @@ def test_default_resource_budget_is_valid():
     result = configure_resource_budget()
 
     assert result.valid is True
-    assert result.cpu_percent == 100.0
-    assert result.memory_mb == 2048.0
-    assert result.disk_mb == 4096.0
-    assert result.process_limit == 32
+    assert isinstance(result.budget, ResourceBudget)
+    assert result.budget.cpu_seconds == 300
+    assert result.budget.memory_mb == 1024
+    assert result.budget.disk_mb == 2048
+    assert result.budget.processes == 32
 
 
-def test_custom_resource_budget_is_valid():
+def test_custom_budget_within_bounds():
+    policy = ResourceBudgetPolicy(
+        minimum_cpu_seconds=1,
+        maximum_cpu_seconds=600,
+        minimum_memory_mb=16,
+        maximum_memory_mb=4096,
+        minimum_disk_mb=16,
+        maximum_disk_mb=8192,
+        minimum_processes=1,
+        maximum_processes=64,
+    )
+
     result = configure_resource_budget(
-        cpu_percent=50,
-        memory_mb=1024,
-        disk_mb=2048,
-        process_limit=16,
+        cpu_seconds=120,
+        memory_mb=512,
+        disk_mb=1024,
+        processes=8,
+        policy=policy,
     )
 
     assert result.valid is True
-    assert result.cpu_percent == 50.0
-    assert result.memory_mb == 1024.0
-    assert result.disk_mb == 2048.0
-    assert result.process_limit == 16
-
-
-@pytest.mark.parametrize(
-    "value",
-    [0, -1, -0.1],
-)
-def test_invalid_cpu_values_are_rejected(value):
-    with pytest.raises(ResourceBudgetConfigurationError):
-        configure_resource_budget(cpu_percent=value)
-
-
-@pytest.mark.parametrize(
-    "value",
-    [101, 100.1],
-)
-def test_cpu_above_100_is_rejected(value):
-    with pytest.raises(ResourceBudgetConfigurationError):
-        configure_resource_budget(cpu_percent=value)
+    assert result.budget.cpu_seconds == 120
+    assert result.budget.memory_mb == 512
+    assert result.budget.disk_mb == 1024
+    assert result.budget.processes == 8
 
 
 @pytest.mark.parametrize(
     "field",
-    ["memory_mb", "disk_mb"],
+    ["cpu_seconds", "memory_mb", "disk_mb", "processes"],
 )
-def test_non_positive_memory_or_disk_is_rejected(field):
-    with pytest.raises(ResourceBudgetConfigurationError):
-        configure_resource_budget(**{field: 0})
+def test_zero_is_rejected(field):
+    kwargs = {field: 0}
 
-    with pytest.raises(ResourceBudgetConfigurationError):
-        configure_resource_budget(**{field: -1})
-
-
-@pytest.mark.parametrize(
-    "value",
-    [0, -1, 1.5, "16", True, False],
-)
-def test_invalid_process_limit_is_rejected(value):
-    with pytest.raises(ResourceBudgetConfigurationError):
-        configure_resource_budget(process_limit=value)
-
-
-@pytest.mark.parametrize(
-    "value",
-    [float("nan"), float("inf"), float("-inf")],
-)
-def test_non_finite_cpu_is_rejected(value):
-    with pytest.raises(ResourceBudgetConfigurationError):
-        configure_resource_budget(cpu_percent=value)
+    with pytest.raises(ResourceBudgetError):
+        configure_resource_budget(**kwargs)
 
 
 @pytest.mark.parametrize(
     "field",
-    ["memory_mb", "disk_mb"],
+    ["cpu_seconds", "memory_mb", "disk_mb", "processes"],
 )
-def test_non_finite_memory_or_disk_is_rejected(field):
-    for value in (float("nan"), float("inf"), float("-inf")):
-        with pytest.raises(ResourceBudgetConfigurationError):
-            configure_resource_budget(**{field: value})
+def test_negative_value_is_rejected(field):
+    kwargs = {field: -1}
+
+    with pytest.raises(ResourceBudgetError):
+        configure_resource_budget(**kwargs)
 
 
-def test_memory_above_policy_limit_is_rejected():
+@pytest.mark.parametrize(
+    "field",
+    ["cpu_seconds", "memory_mb", "disk_mb", "processes"],
+)
+def test_boolean_value_is_rejected(field):
+    kwargs = {field: True}
+
+    with pytest.raises(ResourceBudgetError):
+        configure_resource_budget(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["cpu_seconds", "memory_mb", "disk_mb", "processes"],
+)
+def test_float_value_is_rejected(field):
+    kwargs = {field: 10.5}
+
+    with pytest.raises(ResourceBudgetError):
+        configure_resource_budget(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["cpu_seconds", "memory_mb", "disk_mb", "processes"],
+)
+def test_string_value_is_rejected(field):
+    kwargs = {field: "10"}
+
+    with pytest.raises(ResourceBudgetError):
+        configure_resource_budget(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["cpu_seconds", "memory_mb", "disk_mb", "processes"],
+)
+def test_none_explicitly_uses_default(field):
+    kwargs = {field: None}
+
+    result = configure_resource_budget(**kwargs)
+
+    assert result.valid is True
+
+
+def test_cpu_maximum_is_enforced():
     policy = ResourceBudgetPolicy(
-        max_memory_mb=1024,
+        maximum_cpu_seconds=100,
     )
 
-    with pytest.raises(ResourceBudgetConfigurationError):
+    with pytest.raises(ResourceBudgetError):
+        configure_resource_budget(
+            cpu_seconds=101,
+            policy=policy,
+        )
+
+
+def test_memory_maximum_is_enforced():
+    policy = ResourceBudgetPolicy(
+        maximum_memory_mb=1024,
+    )
+
+    with pytest.raises(ResourceBudgetError):
         configure_resource_budget(
             memory_mb=1025,
             policy=policy,
         )
 
 
-def test_disk_above_policy_limit_is_rejected():
+def test_disk_maximum_is_enforced():
     policy = ResourceBudgetPolicy(
-        max_disk_mb=2048,
+        maximum_disk_mb=2048,
     )
 
-    with pytest.raises(ResourceBudgetConfigurationError):
+    with pytest.raises(ResourceBudgetError):
         configure_resource_budget(
             disk_mb=2049,
             policy=policy,
         )
 
 
-def test_process_limit_above_policy_limit_is_rejected():
+def test_process_maximum_is_enforced():
     policy = ResourceBudgetPolicy(
-        max_process_limit=10,
+        maximum_processes=16,
     )
 
-    with pytest.raises(ResourceBudgetConfigurationError):
+    with pytest.raises(ResourceBudgetError):
         configure_resource_budget(
-            process_limit=11,
+            processes=17,
             policy=policy,
         )
 
 
-def test_invalid_policy_cpu_limit_is_rejected():
+def test_minimum_boundary_is_allowed():
     policy = ResourceBudgetPolicy(
-        max_cpu_percent=101,
-    )
-
-    with pytest.raises(ResourceBudgetConfigurationError):
-        validate_resource_budget_policy(policy)
-
-
-def test_policy_cpu_cannot_exceed_maximum():
-    policy = ResourceBudgetPolicy(
-        cpu_percent=90,
-        max_cpu_percent=80,
-    )
-
-    with pytest.raises(ResourceBudgetConfigurationError):
-        validate_resource_budget_policy(policy)
-
-
-def test_boolean_policy_values_are_rejected():
-    policy = ResourceBudgetPolicy(
-        cpu_percent=True,
-    )
-
-    with pytest.raises(ResourceBudgetConfigurationError):
-        validate_resource_budget_policy(policy)
-
-
-def test_none_uses_policy_defaults():
-    policy = ResourceBudgetPolicy(
-        cpu_percent=50,
-        memory_mb=512,
-        disk_mb=1024,
-        process_limit=8,
+        minimum_cpu_seconds=5,
+        maximum_cpu_seconds=100,
+        minimum_memory_mb=32,
+        maximum_memory_mb=1000,
+        minimum_disk_mb=32,
+        maximum_disk_mb=2000,
+        minimum_processes=2,
+        maximum_processes=20,
     )
 
     result = configure_resource_budget(
-        cpu_percent=None,
-        memory_mb=None,
-        disk_mb=None,
-        process_limit=None,
+        cpu_seconds=5,
+        memory_mb=32,
+        disk_mb=32,
+        processes=2,
         policy=policy,
     )
 
-    assert result.cpu_percent == 50.0
-    assert result.memory_mb == 512.0
-    assert result.disk_mb == 1024.0
-    assert result.process_limit == 8
+    assert result.valid is True
 
 
-def test_result_to_dict():
-    result = configure_resource_budget(
-        cpu_percent=25,
-        memory_mb=512,
-        disk_mb=1024,
-        process_limit=8,
+def test_maximum_boundary_is_allowed():
+    policy = ResourceBudgetPolicy(
+        maximum_cpu_seconds=100,
+        maximum_memory_mb=1000,
+        maximum_disk_mb=2000,
+        maximum_processes=20,
     )
+
+    result = configure_resource_budget(
+        cpu_seconds=100,
+        memory_mb=1000,
+        disk_mb=2000,
+        processes=20,
+        policy=policy,
+    )
+
+    assert result.valid is True
+
+
+def test_invalid_policy_range_is_rejected():
+    policy = ResourceBudgetPolicy(
+        minimum_cpu_seconds=100,
+        maximum_cpu_seconds=10,
+    )
+
+    with pytest.raises(ResourceBudgetError):
+        validate_resource_budget_policy(policy)
+
+
+def test_default_outside_policy_is_rejected():
+    policy = ResourceBudgetPolicy(
+        default_memory_mb=4096,
+        minimum_memory_mb=16,
+        maximum_memory_mb=1024,
+    )
+
+    with pytest.raises(ResourceBudgetError):
+        validate_resource_budget_policy(policy)
+
+
+def test_invalid_policy_type_is_rejected():
+    with pytest.raises(ResourceBudgetError):
+        validate_resource_budget_policy(object())
+
+
+def test_require_returns_resource_budget():
+    budget = require_valid_resource_budget(
+        cpu_seconds=60,
+        memory_mb=256,
+        disk_mb=512,
+        processes=4,
+    )
+
+    assert isinstance(budget, ResourceBudget)
+    assert budget.cpu_seconds == 60
+    assert budget.memory_mb == 256
+    assert budget.disk_mb == 512
+    assert budget.processes == 4
+
+
+def test_to_dict_contains_all_resource_limits():
+    result = configure_resource_budget()
 
     data = result.to_dict()
 
     assert data["valid"] is True
-    assert data["cpu_percent"] == 25.0
-    assert data["memory_mb"] == 512.0
-    assert data["disk_mb"] == 1024.0
-    assert data["process_limit"] == 8
+    assert data["reason"] == "VALID_RESOURCE_BUDGET"
+
+    budget = data["budget"]
+
+    assert budget["cpu_seconds"] == 300
+    assert budget["memory_mb"] == 1024
+    assert budget["disk_mb"] == 2048
+    assert budget["processes"] == 32
 
 
-def test_require_valid_resource_budget():
-    result = require_valid_resource_budget(
-        cpu_percent=25,
-        memory_mb=256,
-        disk_mb=512,
-        process_limit=4,
+def test_configuration_does_not_modify_real_resources():
+    result = configure_resource_budget(
+        cpu_seconds=10,
+        memory_mb=128,
+        disk_mb=256,
+        processes=2,
     )
 
     assert result.valid is True
-    assert result.process_limit == 4

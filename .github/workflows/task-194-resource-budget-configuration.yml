@@ -50,20 +50,24 @@ jobs:
 
           python - <<'PY'
           from sentinelshield.resource_budget_configuration import (
-              ResourceBudgetConfigurationError,
+              ResourceBudgetError,
               ResourceBudgetPolicy,
               configure_resource_budget,
           )
 
           policy = ResourceBudgetPolicy(
-              cpu_percent=50.0,
-              memory_mb=1024.0,
-              disk_mb=2048.0,
-              process_limit=16,
-              max_cpu_percent=100.0,
-              max_memory_mb=4096.0,
-              max_disk_mb=8192.0,
-              max_process_limit=64,
+              default_cpu_seconds=60,
+              minimum_cpu_seconds=1,
+              maximum_cpu_seconds=300,
+              default_memory_mb=512,
+              minimum_memory_mb=16,
+              maximum_memory_mb=2048,
+              default_disk_mb=1024,
+              minimum_disk_mb=16,
+              maximum_disk_mb=4096,
+              default_processes=8,
+              minimum_processes=1,
+              maximum_processes=64,
           )
 
           result = configure_resource_budget(policy=policy)
@@ -73,35 +77,55 @@ jobs:
                   "TASK 194 FAIL: valid resource budget rejected"
               )
 
-          if not 0 < result.cpu_percent <= 100:
+          budget = result.budget
+
+          if not 1 <= budget.cpu_seconds <= 300:
               raise SystemExit(
-                  "TASK 194 FAIL: invalid CPU budget"
+                  "TASK 194 FAIL: CPU budget outside policy"
               )
 
-          if result.memory_mb <= 0 or result.disk_mb <= 0:
+          if not 16 <= budget.memory_mb <= 2048:
               raise SystemExit(
-                  "TASK 194 FAIL: non-positive resource budget"
+                  "TASK 194 FAIL: memory budget outside policy"
               )
 
-          if result.process_limit <= 0:
+          if not 16 <= budget.disk_mb <= 4096:
               raise SystemExit(
-                  "TASK 194 FAIL: invalid process budget"
+                  "TASK 194 FAIL: disk budget outside policy"
               )
 
-          for unsafe in (0, -1, float("inf"), float("nan")):
+          if not 1 <= budget.processes <= 64:
+              raise SystemExit(
+                  "TASK 194 FAIL: process budget outside policy"
+              )
+
+          for unsafe in (0, -1, True, 1.5, "10"):
               try:
                   configure_resource_budget(
-                      cpu_percent=unsafe,
+                      cpu_seconds=unsafe,
                       policy=policy,
                   )
-              except ResourceBudgetConfigurationError:
+              except ResourceBudgetError:
                   continue
 
               raise SystemExit(
                   "TASK 194 FAIL: unsafe CPU budget accepted"
               )
 
+          try:
+              configure_resource_budget(
+                  cpu_seconds=301,
+                  policy=policy,
+              )
+          except ResourceBudgetError:
+              pass
+          else:
+              raise SystemExit(
+                  "TASK 194 FAIL: CPU maximum bypassed"
+              )
+
           print("TASK 194 PASS")
+
           PY
 
       - name: Verify no bytecode changes

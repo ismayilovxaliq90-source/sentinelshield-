@@ -1,240 +1,230 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
-from numbers import Real
+from numbers import Integral
 
 
-class ResourceBudgetConfigurationError(ValueError):
+class ResourceBudgetError(ValueError):
     """Raised when a resource budget is invalid or unsafe."""
 
 
 @dataclass(frozen=True)
 class ResourceBudgetPolicy:
-    cpu_percent: float = 100.0
-    memory_mb: float = 2048.0
-    disk_mb: float = 4096.0
-    process_limit: int = 32
+    default_cpu_seconds: int = 300
+    minimum_cpu_seconds: int = 1
+    maximum_cpu_seconds: int = 3600
 
-    max_cpu_percent: float = 100.0
-    max_memory_mb: float = 16384.0
-    max_disk_mb: float = 32768.0
-    max_process_limit: int = 256
+    default_memory_mb: int = 1024
+    minimum_memory_mb: int = 16
+    maximum_memory_mb: int = 16384
+
+    default_disk_mb: int = 2048
+    minimum_disk_mb: int = 16
+    maximum_disk_mb: int = 32768
+
+    default_processes: int = 32
+    minimum_processes: int = 1
+    maximum_processes: int = 256
+
+
+@dataclass(frozen=True)
+class ResourceBudget:
+    cpu_seconds: int
+    memory_mb: int
+    disk_mb: int
+    processes: int
+
+    def to_dict(self) -> dict:
+        return {
+            "cpu_seconds": self.cpu_seconds,
+            "memory_mb": self.memory_mb,
+            "disk_mb": self.disk_mb,
+            "processes": self.processes,
+        }
 
 
 @dataclass(frozen=True)
 class ResourceBudgetResult:
     valid: bool
-    cpu_percent: float
-    memory_mb: float
-    disk_mb: float
-    process_limit: int
+    budget: ResourceBudget
     reason: str
 
     def to_dict(self) -> dict:
         return {
             "valid": self.valid,
-            "cpu_percent": self.cpu_percent,
-            "memory_mb": self.memory_mb,
-            "disk_mb": self.disk_mb,
-            "process_limit": self.process_limit,
+            "budget": self.budget.to_dict(),
             "reason": self.reason,
         }
 
 
-def _finite_number(value: object, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise ResourceBudgetConfigurationError(
-            f"{field} must be a finite numeric value"
-        )
-
-    converted = float(value)
-
-    if not math.isfinite(converted):
-        raise ResourceBudgetConfigurationError(
-            f"{field} must be finite"
-        )
-
-    return converted
-
-
-def _positive_number(value: object, field: str) -> float:
-    converted = _finite_number(value, field)
-
-    if converted <= 0:
-        raise ResourceBudgetConfigurationError(
-            f"{field} must be greater than zero"
-        )
-
-    return converted
-
-
-def _positive_integer(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ResourceBudgetConfigurationError(
+def _validate_positive_integer(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ResourceBudgetError(
             f"{field} must be a positive integer"
         )
 
+    value = int(value)
+
     if value <= 0:
-        raise ResourceBudgetConfigurationError(
+        raise ResourceBudgetError(
             f"{field} must be greater than zero"
         )
 
     return value
 
 
+def _validate_range(
+    value: object,
+    field: str,
+    minimum: object,
+    maximum: object,
+) -> int:
+    value_int = _validate_positive_integer(value, field)
+    minimum_int = _validate_positive_integer(minimum, f"{field}.minimum")
+    maximum_int = _validate_positive_integer(maximum, f"{field}.maximum")
+
+    if minimum_int > maximum_int:
+        raise ResourceBudgetError(
+            f"{field} minimum cannot exceed maximum"
+        )
+
+    if value_int < minimum_int:
+        raise ResourceBudgetError(
+            f"{field} is below minimum allowed value"
+        )
+
+    if value_int > maximum_int:
+        raise ResourceBudgetError(
+            f"{field} exceeds maximum allowed value"
+        )
+
+    return value_int
+
+
 def validate_resource_budget_policy(
     policy: ResourceBudgetPolicy | None = None,
-) -> ResourceBudgetResult:
-    policy = policy or ResourceBudgetPolicy()
+) -> ResourceBudgetPolicy:
+    if policy is None:
+        policy = ResourceBudgetPolicy()
 
     if not isinstance(policy, ResourceBudgetPolicy):
-        raise ResourceBudgetConfigurationError(
+        raise ResourceBudgetError(
             "policy must be ResourceBudgetPolicy"
         )
 
-    cpu = _finite_number(policy.cpu_percent, "cpu_percent")
-    memory = _positive_number(policy.memory_mb, "memory_mb")
-    disk = _positive_number(policy.disk_mb, "disk_mb")
-    processes = _positive_integer(
-        policy.process_limit,
-        "process_limit",
+    _validate_range(
+        policy.default_cpu_seconds,
+        "default_cpu_seconds",
+        policy.minimum_cpu_seconds,
+        policy.maximum_cpu_seconds,
     )
 
-    max_cpu = _finite_number(
-        policy.max_cpu_percent,
-        "max_cpu_percent",
-    )
-    max_memory = _positive_number(
-        policy.max_memory_mb,
-        "max_memory_mb",
-    )
-    max_disk = _positive_number(
-        policy.max_disk_mb,
-        "max_disk_mb",
-    )
-    max_processes = _positive_integer(
-        policy.max_process_limit,
-        "max_process_limit",
+    _validate_range(
+        policy.default_memory_mb,
+        "default_memory_mb",
+        policy.minimum_memory_mb,
+        policy.maximum_memory_mb,
     )
 
-    if cpu <= 0 or cpu > 100:
-        raise ResourceBudgetConfigurationError(
-            "cpu_percent must be greater than zero and at most 100"
-        )
-
-    if max_cpu <= 0 or max_cpu > 100:
-        raise ResourceBudgetConfigurationError(
-            "max_cpu_percent must be greater than zero and at most 100"
-        )
-
-    if max_cpu < cpu:
-        raise ResourceBudgetConfigurationError(
-            "max_cpu_percent cannot be below cpu_percent"
-        )
-
-    if memory > max_memory:
-        raise ResourceBudgetConfigurationError(
-            "memory_mb exceeds maximum allowed budget"
-        )
-
-    if disk > max_disk:
-        raise ResourceBudgetConfigurationError(
-            "disk_mb exceeds maximum allowed budget"
-        )
-
-    if processes > max_processes:
-        raise ResourceBudgetConfigurationError(
-            "process_limit exceeds maximum allowed budget"
-        )
-
-    if max_processes > 1000000:
-        raise ResourceBudgetConfigurationError(
-            "max_process_limit is unsafe"
-        )
-
-    return ResourceBudgetResult(
-        valid=True,
-        cpu_percent=cpu,
-        memory_mb=memory,
-        disk_mb=disk,
-        process_limit=processes,
-        reason="VALID_RESOURCE_BUDGET",
+    _validate_range(
+        policy.default_disk_mb,
+        "default_disk_mb",
+        policy.minimum_disk_mb,
+        policy.maximum_disk_mb,
     )
+
+    _validate_range(
+        policy.default_processes,
+        "default_processes",
+        policy.minimum_processes,
+        policy.maximum_processes,
+    )
+
+    return policy
 
 
 def configure_resource_budget(
     *,
-    cpu_percent: object | None = None,
+    cpu_seconds: object | None = None,
     memory_mb: object | None = None,
     disk_mb: object | None = None,
-    process_limit: object | None = None,
+    processes: object | None = None,
     policy: ResourceBudgetPolicy | None = None,
 ) -> ResourceBudgetResult:
-    policy = policy or ResourceBudgetPolicy()
-
-    validated = validate_resource_budget_policy(policy)
+    policy = validate_resource_budget_policy(policy)
 
     cpu = (
-        validated.cpu_percent
-        if cpu_percent is None
-        else _finite_number(cpu_percent, "cpu_percent")
+        policy.default_cpu_seconds
+        if cpu_seconds is None
+        else _validate_range(
+            cpu_seconds,
+            "cpu_seconds",
+            policy.minimum_cpu_seconds,
+            policy.maximum_cpu_seconds,
+        )
     )
 
     memory = (
-        validated.memory_mb
+        policy.default_memory_mb
         if memory_mb is None
-        else _positive_number(memory_mb, "memory_mb")
+        else _validate_range(
+            memory_mb,
+            "memory_mb",
+            policy.minimum_memory_mb,
+            policy.maximum_memory_mb,
+        )
     )
 
     disk = (
-        validated.disk_mb
+        policy.default_disk_mb
         if disk_mb is None
-        else _positive_number(disk_mb, "disk_mb")
+        else _validate_range(
+            disk_mb,
+            "disk_mb",
+            policy.minimum_disk_mb,
+            policy.maximum_disk_mb,
+        )
     )
 
-    processes = (
-        validated.process_limit
-        if process_limit is None
-        else _positive_integer(process_limit, "process_limit")
+    process_count = (
+        policy.default_processes
+        if processes is None
+        else _validate_range(
+            processes,
+            "processes",
+            policy.minimum_processes,
+            policy.maximum_processes,
+        )
     )
 
-    if cpu <= 0 or cpu > 100:
-        raise ResourceBudgetConfigurationError(
-            "cpu_percent must be greater than zero and at most 100"
-        )
-
-    if cpu > policy.max_cpu_percent:
-        raise ResourceBudgetConfigurationError(
-            "cpu_percent exceeds maximum allowed budget"
-        )
-
-    if memory > policy.max_memory_mb:
-        raise ResourceBudgetConfigurationError(
-            "memory_mb exceeds maximum allowed budget"
-        )
-
-    if disk > policy.max_disk_mb:
-        raise ResourceBudgetConfigurationError(
-            "disk_mb exceeds maximum allowed budget"
-        )
-
-    if processes > policy.max_process_limit:
-        raise ResourceBudgetConfigurationError(
-            "process_limit exceeds maximum allowed budget"
-        )
+    budget = ResourceBudget(
+        cpu_seconds=cpu,
+        memory_mb=memory,
+        disk_mb=disk,
+        processes=process_count,
+    )
 
     return ResourceBudgetResult(
         valid=True,
-        cpu_percent=cpu,
-        memory_mb=memory,
-        disk_mb=disk,
-        process_limit=processes,
+        budget=budget,
         reason="VALID_RESOURCE_BUDGET",
     )
 
 
 def require_valid_resource_budget(
-    **kwargs: object,
-) -> ResourceBudgetResult:
-    return configure_resource_budget(**kwargs)
+    *,
+    cpu_seconds: object | None = None,
+    memory_mb: object | None = None,
+    disk_mb: object | None = None,
+    processes: object | None = None,
+    policy: ResourceBudgetPolicy | None = None,
+) -> ResourceBudget:
+    result = configure_resource_budget(
+        cpu_seconds=cpu_seconds,
+        memory_mb=memory_mb,
+        disk_mb=disk_mb,
+        processes=processes,
+        policy=policy,
+    )
+
+    return result.budget
