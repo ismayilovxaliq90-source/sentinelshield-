@@ -1,0 +1,101 @@
+name: TASK 193 - Timeout Configuration
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/sentinelshield/timeout_configuration.py"
+      - "tests/test_timeout_configuration.py"
+      - ".github/workflows/task-193-timeout-configuration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  task-193:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.timeout_configuration"
+
+      - name: Run TASK 193 tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_timeout_configuration.py
+
+      - name: Live timeout policy validation
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          import math
+
+          from sentinelshield.timeout_configuration import (
+              TimeoutConfigurationError,
+              TimeoutPolicy,
+              configure_timeout,
+          )
+
+          policy = TimeoutPolicy(
+              default_timeout=30.0,
+              minimum_timeout=1.0,
+              maximum_timeout=120.0,
+          )
+
+          result = configure_timeout(30.0, policy)
+
+          if not result.valid:
+              raise SystemExit("TASK 193 FAIL: valid timeout rejected")
+
+          if not math.isfinite(result.timeout):
+              raise SystemExit("TASK 193 FAIL: non-finite timeout accepted")
+
+          if not 1.0 <= result.timeout <= 120.0:
+              raise SystemExit("TASK 193 FAIL: timeout outside policy bounds")
+
+          for unsafe in (0, -1, float("inf"), float("nan")):
+              try:
+                  configure_timeout(unsafe, policy)
+              except TimeoutConfigurationError:
+                  continue
+
+              raise SystemExit(
+                  "TASK 193 FAIL: unsafe timeout accepted"
+              )
+
+          print("TASK 193 PASS")
+
+          PY
+
+      - name: Verify no bytecode changes
+        run: |
+          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
+
+          if [ -n "$changed" ]; then
+            echo "TASK 193 FAIL: Python bytecode changes detected"
+            echo "$changed"
+            exit 1
+          fi
+
+          echo "TASK 193 PASS: no bytecode changes"
