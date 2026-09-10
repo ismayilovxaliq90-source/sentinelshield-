@@ -1,0 +1,136 @@
+name: TASK 199 - Dependency Update Execution
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/sentinelshield/dependency_update_execution.py"
+      - "tests/test_dependency_update_execution.py"
+      - ".github/workflows/task-199-dependency-update-execution.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  task-199:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.dependency_update_execution"
+
+      - name: Run TASK 199 tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_dependency_update_execution.py
+
+      - name: Live controlled execution validation
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          from sentinelshield.dependency_update_execution import (
+              DependencyUpdateExecutionError,
+              DependencyUpdatePolicy,
+              execute_dependency_update,
+          )
+
+          with tempfile.TemporaryDirectory() as directory:
+              workspace = Path(directory)
+
+              safe = execute_dependency_update(
+                  (
+                      sys.executable,
+                      "-c",
+                      "print('controlled execution')",
+                  ),
+                  working_directory=workspace,
+                  policy=DependencyUpdatePolicy(
+                      timeout_seconds=10.0,
+                  ),
+              )
+
+              if not safe.success:
+                  raise SystemExit(
+                      "TASK 199 FAIL: controlled execution failed"
+                  )
+
+              if safe.exit_code != 0:
+                  raise SystemExit(
+                      "TASK 199 FAIL: successful command returned non-zero"
+                  )
+
+              timeout_result = execute_dependency_update(
+                  (
+                      sys.executable,
+                      "-c",
+                      "import time; time.sleep(5)",
+                  ),
+                  working_directory=workspace,
+                  policy=DependencyUpdatePolicy(
+                      timeout_seconds=0.2,
+                  ),
+              )
+
+              if not timeout_result.timed_out:
+                  raise SystemExit(
+                      "TASK 199 FAIL: timeout was not enforced"
+                  )
+
+              try:
+                  execute_dependency_update(
+                      (
+                          sys.executable,
+                          "-c",
+                          "print('x')",
+                      ),
+                      working_directory=workspace,
+                      policy=DependencyUpdatePolicy(
+                          timeout_seconds=0,
+                      ),
+                  )
+              except DependencyUpdateExecutionError:
+                  pass
+              else:
+                  raise SystemExit(
+                      "TASK 199 FAIL: zero timeout was accepted"
+                  )
+
+          print("TASK 199 PASS")
+          PY
+
+      - name: Verify no bytecode changes
+        run: |
+          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
+
+          if [ -n "$changed" ]; then
+            echo "TASK 199 FAIL: Python bytecode changes detected"
+            echo "$changed"
+            exit 1
+          fi
+
+          echo "TASK 199 PASS: no bytecode changes"
