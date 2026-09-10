@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install test dependency
+      - name: Install pytest
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest
@@ -65,12 +65,10 @@ jobs:
           assert denied.allowed is False
           assert denied.reason == "EXECUTABLE_NOT_ALLOWED"
 
-          print("TASK 188 PASS")
-          print("allowed:", allowed)
-          print("denied:", denied)
+          print("TASK 188 LIVE VALIDATION PASS")
           PY
 
-      - name: Verify no bytecode changes were generated
+      - name: Verify no bytecode changes
         run: |
           if git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo' | grep -q .; then
             echo "TASK 188 FAIL: bytecode changes detected"

@@ -3,8 +3,8 @@ import pytest
 from sentinelshield.command_allowlist_validation import (
     CommandAllowlistError,
     CommandAllowlistPolicy,
-    validate_command_allowlist,
     require_allowed_command,
+    validate_command_allowlist,
 )
 
 
@@ -22,6 +22,7 @@ def test_denied_executable():
     result = validate_command_allowlist(["rm", "-rf", "/tmp/x"], policy)
 
     assert result.allowed is False
+    assert result.executable == "rm"
     assert result.reason == "EXECUTABLE_NOT_ALLOWED"
 
 
@@ -71,7 +72,7 @@ def test_null_character_is_rejected():
     ],
 )
 def test_path_qualified_executable_is_rejected(command):
-    policy = CommandAllowlistPolicy({"git", "foo/bar"})
+    policy = CommandAllowlistPolicy({"git"})
 
     with pytest.raises(CommandAllowlistError):
         validate_command_allowlist(command, policy)
@@ -96,15 +97,21 @@ def test_shell_metacharacters_are_rejected(command):
         validate_command_allowlist(command, policy)
 
 
-@pytest.mark.parametrize("command", [["."], [".."]])
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["."],
+        [".."],
+    ],
+)
 def test_dot_executable_is_rejected(command):
-    policy = CommandAllowlistPolicy({".", ".."})
+    policy = CommandAllowlistPolicy({"git"})
 
     with pytest.raises(CommandAllowlistError):
         validate_command_allowlist(command, policy)
 
 
-def test_arguments_are_not_part_of_allowlist_decision():
+def test_arguments_do_not_change_executable_allowlist_decision():
     policy = CommandAllowlistPolicy({"git"})
 
     result = validate_command_allowlist(
@@ -140,7 +147,7 @@ def test_allowlist_is_immutable():
         " git",
         "git ",
         "foo/bar",
-        "foo\\bar",
+        r"foo\bar",
         "git;rm",
         "git\x00evil",
         ".",

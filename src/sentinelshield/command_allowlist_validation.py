@@ -56,7 +56,10 @@ class CommandAllowlistPolicy:
                     "invalid executable name"
                 )
 
-            if any(char in executable for char in ";|&><`$(){}[]*?!\n\r"):
+            if any(
+                char in executable
+                for char in ";|&><`$(){}[]*?!\n\r"
+            ):
                 raise CommandAllowlistError(
                     "allowlist entry contains shell metacharacters"
                 )
@@ -75,7 +78,7 @@ class CommandAllowlistResult:
     reason: str
 
 
-def _validate_command_shape(command: Sequence[str]) -> None:
+def _validate_command_shape(command: Sequence[str]) -> tuple[str, ...]:
     if isinstance(command, (str, bytes)):
         raise CommandAllowlistError(
             "command must be a sequence of strings, not a string"
@@ -104,6 +107,8 @@ def _validate_command_shape(command: Sequence[str]) -> None:
                 "command must not contain NULL characters"
             )
 
+    return values
+
 
 def _validate_executable_name(executable: str) -> None:
     if not executable:
@@ -126,7 +131,10 @@ def _validate_executable_name(executable: str) -> None:
             "dot executable names are not allowed"
         )
 
-    if any(char in executable for char in ";|&><`$(){}[]*?!\n\r"):
+    if any(
+        char in executable
+        for char in ";|&><`$(){}[]*?!\n\r"
+    ):
         raise CommandAllowlistError(
             "executable contains shell metacharacters"
         )
@@ -141,9 +149,7 @@ def validate_command_allowlist(
             "policy must be CommandAllowlistPolicy"
         )
 
-    _validate_command_shape(command)
-
-    values = tuple(command)
+    values = _validate_command_shape(command)
     executable = values[0]
 
     _validate_executable_name(executable)
