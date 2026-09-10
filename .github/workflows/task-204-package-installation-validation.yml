@@ -1,0 +1,212 @@
+name: TASK 204 - Package Installation Validation
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/package_installation_validation.py"
+      - "tests/test_package_installation_validation.py"
+      - ".github/workflows/task-204-package-installation-validation.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/package_installation_validation.py"
+      - "tests/test_package_installation_validation.py"
+      - ".github/workflows/task-204-package-installation-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-204:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Verify module import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.package_installation_validation"
+
+      - name: Run TASK 204 unit tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q \
+            tests/test_package_installation_validation.py
+
+      - name: Create isolated installation fixture
+        run: |
+          set -euo pipefail
+
+          FIXTURE="$RUNNER_TEMP/task-204-fixture"
+
+          rm -rf "$FIXTURE"
+          mkdir -p "$FIXTURE"
+
+          cd "$FIXTURE"
+
+          git init -q
+
+          cat > package.json <<'JSON'
+          {
+            "name": "sentinelshield-task-204-fixture",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "is-number": "7.0.0"
+            }
+          }
+          JSON
+
+          npm install \
+            --package-lock-only \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+
+          test -f package-lock.json
+
+      - name: Execute real package installation on runner
+        run: |
+          set -euo pipefail
+
+          FIXTURE="$RUNNER_TEMP/task-204-fixture"
+
+          cd "$FIXTURE"
+
+          npm ci \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+
+          test -d node_modules
+          test -f node_modules/is-number/package.json
+
+      - name: Validate installed package state
+        run: |
+          set -euo pipefail
+
+          FIXTURE="$RUNNER_TEMP/task-204-fixture"
+
+          cat > "$RUNNER_TEMP/task_204_live_check.py" <<PY
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "${GITHUB_WORKSPACE}/src")
+
+          from sentinelshield.package_installation_validation import (
+              PackageInstallationRequest,
+              validate_installed_state,
+              validate_installation_result,
+          )
+
+          root = Path("${FIXTURE}")
+
+          result = validate_installed_state(root)
+
+          if not validate_installation_result(result):
+              print("TASK 204 FAIL: result validation failed")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          if not result.success:
+              print("TASK 204 FAIL: installed state invalid")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          if result.expected_dependency_count != 1:
+              print("TASK 204 FAIL: unexpected dependency count")
+              raise SystemExit(1)
+
+          if result.actual_dependency_count != 1:
+              print("TASK 204 FAIL: installed dependency count mismatch")
+              raise SystemExit(1)
+
+          if not result.lockfile_present:
+              print("TASK 204 FAIL: package-lock.json missing")
+              raise SystemExit(1)
+
+          if not result.installation_directory_present:
+              print("TASK 204 FAIL: node_modules missing")
+              raise SystemExit(1)
+
+          package = result.installed[0]
+
+          if package.name != "is-number":
+              print("TASK 204 FAIL: unexpected package")
+              raise SystemExit(1)
+
+          if package.version != "7.0.0":
+              print("TASK 204 FAIL: unexpected installed version")
+              raise SystemExit(1)
+
+          print("TASK 204 PASS")
+          print("installed package:", package.name)
+          print("installed version:", package.version)
+          PY
+
+          PYTHONPATH="$GITHUB_WORKSPACE/src" \
+          PYTHONDONTWRITEBYTECODE=1 \
+          python "$RUNNER_TEMP/task_204_live_check.py"
+
+          rm -f "$RUNNER_TEMP/task_204_live_check.py"
+
+      - name: Verify npm installation is script-free
+        run: |
+          set -euo pipefail
+
+          FIXTURE="$RUNNER_TEMP/task-204-fixture"
+
+          cd "$FIXTURE"
+
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("node_modules/is-number/package.json"));
+            if (pkg.name !== "is-number") process.exit(1);
+            if (pkg.version !== "7.0.0") process.exit(1);
+            console.log("Installed package metadata PASS");
+          '
+
+      - name: Verify repository was not modified
+        run: |
+          set -euo pipefail
+
+          if [ -n "$(git status --porcelain=v1)" ]; then
+            echo "TASK 204 FAIL: repository changed unexpectedly"
+            git status --short
+            exit 1
+          fi
+
+          echo "TASK 204 repository state PASS"
+
+      - name: Verify no bytecode changes
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain=v1 | grep -E \
+            '(^|[[:space:]])[^[:space:]]*\.pyc$|__pycache__'; then
+            echo "TASK 204 FAIL: bytecode changes detected"
+            exit 1
+          fi
+
+          echo "TASK 204 bytecode verification PASS"
