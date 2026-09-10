@@ -9,8 +9,6 @@ class CommandAllowlistError(ValueError):
     """Raised when a command allowlist policy is invalid."""
 
 
-# Shell syntax is intentionally forbidden at this layer.
-# Argument-specific validation belongs to Task 189.
 _SHELL_META_RE = re.compile(r"[;&|`$><\n\r]")
 
 
@@ -19,13 +17,10 @@ class CommandAllowlistPolicy:
     """
     Immutable executable allowlist.
 
-    The policy contains executable BASENAMES only.
-    Path-qualified executables are deliberately rejected.
+    Only executable basenames are permitted.
+    Path-qualified executables are rejected.
 
-    Example:
-        CommandAllowlistPolicy(
-            allowed_commands=frozenset({"git", "python3"})
-        )
+    Argument validation is intentionally handled by Task 189.
     """
 
     allowed_commands: frozenset[str]
@@ -58,6 +53,11 @@ class CommandAllowlistPolicy:
                     f"path-qualified executable is forbidden: {command!r}"
                 )
 
+            if "\x00" in command:
+                raise CommandAllowlistError(
+                    "NULL character in allowlist entry"
+                )
+
             if _SHELL_META_RE.search(command):
                 raise CommandAllowlistError(
                     f"shell metacharacter in allowlist entry: {command!r}"
@@ -69,7 +69,9 @@ class CommandAllowlistPolicy:
         commands: Iterable[str],
     ) -> "CommandAllowlistPolicy":
         if isinstance(commands, (str, bytes)):
-            raise TypeError("commands must be an iterable of executable names")
+            raise TypeError(
+                "commands must be an iterable of executable names"
+            )
 
         try:
             values = frozenset(commands)
@@ -81,8 +83,6 @@ class CommandAllowlistPolicy:
 
 @dataclass(frozen=True)
 class CommandAllowlistResult:
-    """Result of command executable allowlist validation."""
-
     allowed: bool
     executable: str | None
     reason: str
@@ -97,38 +97,34 @@ class CommandAllowlistResult:
         }
 
 
-def _reject_invalid_command_shape(
+def _validate_command_shape(
     command: object,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, int]:
     if isinstance(command, (str, bytes)):
-        return False, "COMMAND_MUST_BE_SEQUENCE"
+        return False, "COMMAND_MUST_BE_SEQUENCE", 0
 
     if not isinstance(command, Sequence):
-        return False, "COMMAND_MUST_BE_SEQUENCE"
+        return False, "COMMAND_MUST_BE_SEQUENCE", 0
 
-    if len(command) == 0:
-        return False, "COMMAND_IS_EMPTY"
+    length = len(command)
+
+    if length == 0:
+        return False, "COMMAND_IS_EMPTY", 0
 
     for item in command:
         if not isinstance(item, str):
-            return False, "COMMAND_ELEMENT_MUST_BE_STRING"
+            return False, "COMMAND_ELEMENT_MUST_BE_STRING", length
 
         if item == "":
-            return False, "COMMAND_ELEMENT_IS_EMPTY"
+            return False, "COMMAND_ELEMENT_IS_EMPTY", length
 
         if "\x00" in item:
-            return False, "NULL_CHARACTER_NOT_ALLOWED"
+            return False, "NULL_CHARACTER_NOT_ALLOWED", length
 
-    return True, "OK"
+    return True, "OK", length
 
 
 def _validate_executable_name(executable: str) -> str | None:
-    """
-    Validate only the executable component.
-
-    Argument validation intentionally remains outside Task 188
-    and belongs to Task 189.
-    """
     if not executable:
         return "EXECUTABLE_IS_EMPTY"
 
@@ -141,11 +137,11 @@ def _validate_executable_name(executable: str) -> str | None:
     if "/" in executable or "\\" in executable:
         return "EXECUTABLE_PATH_NOT_ALLOWED"
 
-    if _SHELL_META_RE.search(executable):
-        return "EXECUTABLE_SHELL_SYNTAX_NOT_ALLOWED"
-
     if "\x00" in executable:
         return "NULL_CHARACTER_NOT_ALLOWED"
+
+    if _SHELL_META_RE.search(executable):
+        return "EXECUTABLE_SHELL_SYNTAX_NOT_ALLOWED"
 
     return None
 
@@ -155,29 +151,21 @@ def validate_command_allowlist(
     policy: CommandAllowlistPolicy,
 ) -> CommandAllowlistResult:
     """
-    Validate a command against an explicit executable allowlist.
+    Validate only the executable component against an explicit allowlist.
 
-    Security properties:
-    - no shell execution
-    - no executable lookup
-    - no command execution
-    - default deny
-    - path-qualified executables rejected
-    - argument validation deferred to Task 189
+    This function:
+    - does not execute commands;
+    - does not invoke a shell;
+    - does not resolve executables;
+    - does not modify the filesystem;
+    - fails closed for unknown executables.
     """
     if not isinstance(policy, CommandAllowlistPolicy):
         raise TypeError("policy must be CommandAllowlistPolicy")
 
-    valid_shape, reason = _reject_invalid_command_shape(command)
+    valid, reason, length = _validate_command_shape(command)
 
-    if not valid_shape:
-        length = (
-            len(command)
-            if isinstance(command, Sequence)
-            and not isinstance(command, (str, bytes))
-            else 0
-        )
-
+    if not valid:
         return CommandAllowlistResult(
             allowed=False,
             executable=None,
@@ -194,7 +182,7 @@ def validate_command_allowlist(
             allowed=False,
             executable=executable,
             reason=executable_error,
-            command_length=len(command),
+            command_length=length,
         )
 
     if executable not in policy.allowed_commands:
@@ -202,14 +190,14 @@ def validate_command_allowlist(
             allowed=False,
             executable=executable,
             reason="EXECUTABLE_NOT_ALLOWLISTED",
-            command_length=len(command),
+            command_length=length,
         )
 
     return CommandAllowlistResult(
         allowed=True,
         executable=executable,
         reason="EXECUTABLE_ALLOWLISTED",
-        command_length=len(command),
+        command_length=length,
     )
 
 
@@ -218,10 +206,9 @@ def require_allowed_command(
     policy: CommandAllowlistPolicy,
 ) -> CommandAllowlistResult:
     """
-    Fail closed when a command is not explicitly allowlisted.
+    Fail closed if the executable is not explicitly allowlisted.
 
-    This function performs validation only.
-    It NEVER executes the command.
+    No command is executed.
     """
     result = validate_command_allowlist(command, policy)
 

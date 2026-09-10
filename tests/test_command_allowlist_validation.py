@@ -26,15 +26,11 @@ def test_allowed_executable_passes(policy):
     assert result.command_length == 2
 
 
-def test_another_allowed_executable_passes(policy):
-    result = validate_command_allowlist(["python3", "--version"], policy)
-
-    assert result.allowed is True
-    assert result.executable == "python3"
-
-
 def test_non_allowlisted_executable_fails(policy):
-    result = validate_command_allowlist(["curl", "https://example.com"], policy)
+    result = validate_command_allowlist(
+        ["curl", "https://example.com"],
+        policy,
+    )
 
     assert result.allowed is False
     assert result.executable == "curl"
@@ -55,6 +51,13 @@ def test_bytes_command_is_rejected(policy):
     assert result.reason == "COMMAND_MUST_BE_SEQUENCE"
 
 
+def test_none_command_is_rejected(policy):
+    result = validate_command_allowlist(None, policy)
+
+    assert result.allowed is False
+    assert result.reason == "COMMAND_MUST_BE_SEQUENCE"
+
+
 def test_empty_command_is_rejected(policy):
     result = validate_command_allowlist([], policy)
 
@@ -62,21 +65,14 @@ def test_empty_command_is_rejected(policy):
     assert result.reason == "COMMAND_IS_EMPTY"
 
 
-def test_non_sequence_command_is_rejected(policy):
-    result = validate_command_allowlist(None, policy)
-
-    assert result.allowed is False
-    assert result.reason == "COMMAND_MUST_BE_SEQUENCE"
-
-
-def test_non_string_argument_is_rejected(policy):
+def test_non_string_element_is_rejected(policy):
     result = validate_command_allowlist(["git", 123], policy)
 
     assert result.allowed is False
     assert result.reason == "COMMAND_ELEMENT_MUST_BE_STRING"
 
 
-def test_empty_command_element_is_rejected(policy):
+def test_empty_element_is_rejected(policy):
     result = validate_command_allowlist(["git", ""], policy)
 
     assert result.allowed is False
@@ -126,14 +122,14 @@ def test_shell_syntax_in_executable_is_rejected(policy, command):
     assert result.allowed is False
 
 
-def test_executable_whitespace_is_rejected(policy):
+def test_executable_leading_whitespace_is_rejected(policy):
     result = validate_command_allowlist([" git"], policy)
 
     assert result.allowed is False
     assert result.reason == "EXECUTABLE_WHITESPACE_NOT_ALLOWED"
 
 
-def test_trailing_executable_whitespace_is_rejected(policy):
+def test_executable_trailing_whitespace_is_rejected(policy):
     result = validate_command_allowlist(["git "], policy)
 
     assert result.allowed is False
@@ -154,20 +150,17 @@ def test_dotdot_executable_is_rejected(policy):
     assert result.reason == "EXECUTABLE_PATH_NOT_ALLOWED"
 
 
-def test_argument_content_is_not_mistaken_for_executable_policy(policy):
+def test_arguments_do_not_change_executable_allowlist(policy):
     result = validate_command_allowlist(
         ["git", "status", "--porcelain"],
         policy,
     )
 
     assert result.allowed is True
+    assert result.executable == "git"
 
 
-def test_argument_shell_text_does_not_change_executable_allowlist_result(policy):
-    """
-    Task 188 validates the executable only.
-    Detailed argument restrictions belong to Task 189.
-    """
+def test_argument_shell_text_belongs_to_task_189(policy):
     result = validate_command_allowlist(
         ["git", "status; echo forbidden"],
         policy,
@@ -177,31 +170,40 @@ def test_argument_shell_text_does_not_change_executable_allowlist_result(policy)
     assert result.executable == "git"
 
 
-def test_default_deny_requires_explicit_policy():
+def test_default_deny(policy):
+    result = validate_command_allowlist(
+        ["unknown-command"],
+        policy,
+    )
+
+    assert result.allowed is False
+
+
+def test_empty_policy_denies_everything():
     policy = CommandAllowlistPolicy.from_iterable(set())
 
-    result = validate_command_allowlist(["git", "status"], policy)
+    result = validate_command_allowlist(["git"], policy)
 
     assert result.allowed is False
     assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
 
 
-def test_policy_rejects_string_as_allowlist():
+def test_policy_rejects_string():
     with pytest.raises(TypeError):
         CommandAllowlistPolicy.from_iterable("git")
 
 
-def test_policy_rejects_bytes_as_allowlist():
+def test_policy_rejects_bytes():
     with pytest.raises(TypeError):
         CommandAllowlistPolicy.from_iterable(b"git")
 
 
-def test_policy_rejects_empty_allowlist_entry():
+def test_policy_rejects_empty_entry():
     with pytest.raises(CommandAllowlistError):
         CommandAllowlistPolicy.from_iterable({"git", ""})
 
 
-def test_policy_rejects_path_allowlist_entry():
+def test_policy_rejects_path_entry():
     with pytest.raises(CommandAllowlistError):
         CommandAllowlistPolicy.from_iterable({"/usr/bin/git"})
 
@@ -226,9 +228,7 @@ def test_require_allowed_command_fails_closed(policy):
 def test_result_to_dict(policy):
     result = validate_command_allowlist(["git"], policy)
 
-    data = result.to_dict()
-
-    assert data == {
+    assert result.to_dict() == {
         "allowed": True,
         "executable": "git",
         "reason": "EXECUTABLE_ALLOWLISTED",
@@ -250,11 +250,7 @@ def test_allowlist_matching_is_case_sensitive(policy):
     assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
 
 
-def test_no_command_execution_is_performed(policy):
-    """
-    The validation API has no execution side effect.
-    A harmless-looking command is still only inspected.
-    """
+def test_validation_does_not_execute_command(policy):
     result = validate_command_allowlist(
         ["python3", "-c", "raise SystemExit(99)"],
         policy,
