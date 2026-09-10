@@ -4,12 +4,11 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable
 
 
 MAX_PATH_LENGTH = 4096
 MAX_DIFF_LENGTH = 2_000_000
-MAX_LINES = 100_000
 MAX_ITEMS = 10_000
 
 SUPPORTED_MANIFESTS = {
@@ -35,77 +34,81 @@ SUPPORTED_MANIFESTS = {
 
 _SECRET_PATTERNS = (
     re.compile(
-        r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key)"
-        r"(\s*[:=]\s*)(['\"]?)[^'\"\s,}]+",
+        r"(?i)\b(password|passwd|pwd|token|secret|api[_-]?key|"
+        r"access[_-]?key|private[_-]?key)"
+        r"(\s*[:=]\s*)(['\"]?)[^'\"\s,}]+"
     ),
-    re.compile(
-        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
-    ),
-    re.compile(
-        r"\bsk-[A-Za-z0-9_-]{8,}\b",
-    ),
-)
-
-_DEPENDENCY_VERSION_PATTERN = re.compile(
-    r"""
-    (?P<name>
-        @?[A-Za-z0-9_.-]+
-        (?:/[A-Za-z0-9_.-]+)?
-    )
-    \s*
-    (?P<separator>
-        ==|===|>=|<=|~=|>|<|:|=|
-    )
-    \s*
-    (?P<version>
-        [0-9]+(?:\.[0-9A-Za-z*+_-]+){1,5}
-        (?:[-+][0-9A-Za-z._-]+)?
-    )
-    """,
-    re.VERBOSE,
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
 )
 
 _JSON_DEP_PATTERN = re.compile(
-    r'"(?P<name>@?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?)"\s*:\s*'
-    r'"(?P<version>[^"]+)"'
+    r'"(?P<name>@?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?)"'
+    r'\s*:\s*"(?P<version>[^"]+)"'
 )
 
 _PYTHON_DEP_PATTERN = re.compile(
-    r'(?P<name>[A-Za-z0-9_.-]+)\s*'
-    r'(?P<operator>===|==|>=|<=|~=|>|<)\s*'
-    r'(?P<version>[0-9]+(?:\.[0-9A-Za-z*+_-]+){1,5}(?:[-+][0-9A-Za-z._-]+)?)'
+    r"(?P<name>[A-Za-z0-9_.-]+)"
+    r"\s*(?P<operator>===|==|>=|<=|~=|>|<)"
+    r"\s*(?P<version>[0-9]+(?:\.[0-9A-Za-z*+_-]+){1,5}"
+    r"(?:[-+][0-9A-Za-z._-]+)?)"
 )
 
 _DIFF_FILE_PATTERN = re.compile(
     r"^diff --git a/(?P<a>\S+) b/(?P<b>\S+)$"
 )
 
-_HUNK_PATTERN = re.compile(r"^@@(?: -\d+(?:,\d+)?)+ \+(?P<new>\d+)(?:,\d+)? @@")
+_HUNK_PATTERN = re.compile(
+    r"^@@(?: -\d+(?:,\d+)?)+ "
+    r"\+(?P<new>\d+)(?:,\d+)? @@"
+)
 
 _NULL = "\x00"
 
 
 class ManifestDiffAnalysisError(ValueError):
-    """Raised when manifest diff analysis input is invalid."""
+    """Invalid manifest diff analysis input."""
 
 
-def _validate_text(value: object, name: str, max_length: int) -> str:
+def _validate_text(
+    value: object,
+    name: str,
+    maximum: int,
+) -> str:
     if not isinstance(value, str):
-        raise ManifestDiffAnalysisError(f"{name} must be a string")
+        raise ManifestDiffAnalysisError(
+            f"{name} must be a string"
+        )
+
     if not value:
-        raise ManifestDiffAnalysisError(f"{name} must not be empty")
+        raise ManifestDiffAnalysisError(
+            f"{name} must not be empty"
+        )
+
     if _NULL in value:
-        raise ManifestDiffAnalysisError(f"{name} contains a NULL character")
-    if len(value) > max_length:
-        raise ManifestDiffAnalysisError(f"{name} is too long")
+        raise ManifestDiffAnalysisError(
+            f"{name} contains a NULL character"
+        )
+
+    if len(value) > maximum:
+        raise ManifestDiffAnalysisError(
+            f"{name} is too long"
+        )
+
     return value
 
 
-def _normalize_relative_path(value: str) -> str:
-    value = _validate_text(value, "Manifest path", MAX_PATH_LENGTH).strip()
+def _normalize_relative_path(value: object) -> str:
+    value = _validate_text(
+        value,
+        "Manifest path",
+        MAX_PATH_LENGTH,
+    ).strip()
 
     if not value:
-        raise ManifestDiffAnalysisError("Manifest path must not be empty")
+        raise ManifestDiffAnalysisError(
+            "Manifest path must not be empty"
+        )
 
     path = Path(value)
 
@@ -114,27 +117,26 @@ def _normalize_relative_path(value: str) -> str:
             "Manifest path must be repository-relative"
         )
 
-    if value in {".", "./"}:
+    normalized = value.replace("\\", "/")
+
+    if normalized in {".", "./"}:
         raise ManifestDiffAnalysisError(
             "Manifest path must not be repository root"
         )
 
-    parts = value.replace("\\", "/").split("/")
+    parts = normalized.split("/")
 
     if any(part in {"", ".", ".."} for part in parts):
         raise ManifestDiffAnalysisError(
             "Manifest path contains an unsafe component"
         )
 
-    normalized = "/".join(parts)
-
-    if len(normalized) > MAX_PATH_LENGTH:
-        raise ManifestDiffAnalysisError("Manifest path is too long")
-
-    return normalized
+    return "/".join(parts)
 
 
-def _validate_repository_root(value: object) -> Path:
+def _validate_repository_root(
+    value: object,
+) -> Path:
     if not isinstance(value, (str, Path)):
         raise ManifestDiffAnalysisError(
             "Repository root must be a string or Path"
@@ -190,36 +192,24 @@ def _normalize_manifest_paths(
             "Too many manifest paths"
         )
 
-    result: list[str] = []
-
-    for value in values:
-        result.append(_normalize_relative_path(value))
+    result = tuple(
+        _normalize_relative_path(item)
+        for item in values
+    )
 
     if len(set(result)) != len(result):
         raise ManifestDiffAnalysisError(
             "Duplicate manifest paths are not allowed"
         )
 
-    return tuple(result)
-
-
-def _ensure_inside(root: Path, candidate: Path) -> Path:
-    try:
-        resolved = candidate.resolve()
-        resolved.relative_to(root)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ManifestDiffAnalysisError(
-            "Path is outside repository root"
-        ) from exc
-
-    return resolved
+    return result
 
 
 def _validate_manifest_files(
     root: Path,
-    manifest_paths: Sequence[str],
+    paths: Iterable[str],
 ) -> None:
-    for relative in manifest_paths:
+    for relative in paths:
         candidate = root / relative
 
         try:
@@ -242,24 +232,31 @@ def _redact(value: str) -> str:
         if pattern.groups >= 3:
             result = pattern.sub(
                 lambda match: (
-                    f"{match.group(1)}{match.group(2)}"
-                    f"{match.group(3)}[REDACTED]"
+                    f"{match.group(1)}"
+                    f"{match.group(2)}"
+                    f"{match.group(3)}"
+                    "[REDACTED]"
                 ),
                 result,
             )
         else:
-            result = pattern.sub("[REDACTED]", result)
+            result = pattern.sub(
+                "[REDACTED]",
+                result,
+            )
 
     return result
 
 
-def _manager_for_manifest(path: str) -> str | None:
-    name = Path(path).name
-
+def _manager_for_manifest(
+    path: str,
+) -> str | None:
     if path in SUPPORTED_MANIFESTS:
         return SUPPORTED_MANIFESTS[path]
 
-    return SUPPORTED_MANIFESTS.get(name)
+    return SUPPORTED_MANIFESTS.get(
+        Path(path).name
+    )
 
 
 def _parse_dependency_line(
@@ -271,40 +268,26 @@ def _parse_dependency_line(
     if not clean:
         return None
 
-    json_match = _JSON_DEP_PATTERN.search(clean)
+    match = _JSON_DEP_PATTERN.search(clean)
 
-    if json_match:
-        name = json_match.group("name")
-        version = json_match.group("version")
-
-        if manager in {"npm", "pnpm", "yarn", "composer"}:
-            if version.startswith((
-                "^",
-                "~",
-                ">",
-                "<",
-                "=",
-                "*",
-            )):
-                return name, version
-            return name, version
-
-    python_match = _PYTHON_DEP_PATTERN.search(clean)
-
-    if python_match:
+    if match and manager in {
+        "npm",
+        "pnpm",
+        "yarn",
+        "composer",
+    }:
         return (
-            python_match.group("name"),
-            python_match.group("operator")
-            + python_match.group("version"),
+            match.group("name"),
+            match.group("version"),
         )
 
-    generic = _DEPENDENCY_VERSION_PATTERN.search(clean)
+    match = _PYTHON_DEP_PATTERN.search(clean)
 
-    if generic:
+    if match:
         return (
-            generic.group("name"),
-            generic.group("separator")
-            + generic.group("version"),
+            match.group("name"),
+            match.group("operator")
+            + match.group("version"),
         )
 
     return None
@@ -316,28 +299,33 @@ def _is_dependency_context(
 ) -> bool:
     lower = line.lower()
 
-    if manager in {"npm", "pnpm", "yarn", "composer"}:
-        return any(
-            marker in lower
-            for marker in (
-                "dependencies",
-                "devdependencies",
-                "optionaldependencies",
-                "peerdependencies",
-            )
-        ) or bool(_JSON_DEP_PATTERN.search(line))
+    if manager in {
+        "npm",
+        "pnpm",
+        "yarn",
+        "composer",
+    }:
+        return (
+            "dependencies" in lower
+            or "devdependencies" in lower
+            or "optionaldependencies" in lower
+            or "peerdependencies" in lower
+            or bool(_JSON_DEP_PATTERN.search(line))
+        )
 
-    if manager in {"python", "pip", "poetry", "pipenv"}:
+    if manager in {
+        "python",
+        "pip",
+        "pipenv",
+        "poetry",
+    }:
         return (
             "dependencies" in lower
             or "requires" in lower
             or bool(_PYTHON_DEP_PATTERN.search(line))
         )
 
-    if manager in {"go", "cargo", "maven", "gradle", "nuget", "swift"}:
-        return True
-
-    return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -349,20 +337,27 @@ class ManifestDependencyChange:
     line_number: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
+        if not isinstance(self.name, str):
             raise ManifestDiffAnalysisError(
-                "Dependency name must be a non-empty string"
+                "Dependency name must be a string"
+            )
+
+        if not self.name.strip():
+            raise ManifestDiffAnalysisError(
+                "Dependency name must not be empty"
             )
 
         if self.old_version is not None and not isinstance(
-            self.old_version, str
+            self.old_version,
+            str,
         ):
             raise ManifestDiffAnalysisError(
                 "old_version must be a string or None"
             )
 
         if self.new_version is not None and not isinstance(
-            self.new_version, str
+            self.new_version,
+            str,
         ):
             raise ManifestDiffAnalysisError(
                 "new_version must be a string or None"
@@ -388,21 +383,33 @@ class ManifestDependencyChange:
             )
 
         if self.change_type == "added":
-            if self.new_version is None or self.old_version is not None:
+            if self.old_version is not None:
                 raise ManifestDiffAnalysisError(
-                    "Invalid added dependency state"
+                    "Added dependency cannot have old_version"
+                )
+            if self.new_version is None:
+                raise ManifestDiffAnalysisError(
+                    "Added dependency requires new_version"
                 )
 
         if self.change_type == "removed":
-            if self.old_version is None or self.new_version is not None:
+            if self.old_version is None:
                 raise ManifestDiffAnalysisError(
-                    "Invalid removed dependency state"
+                    "Removed dependency requires old_version"
+                )
+            if self.new_version is not None:
+                raise ManifestDiffAnalysisError(
+                    "Removed dependency cannot have new_version"
                 )
 
         if self.change_type == "updated":
-            if self.old_version is None or self.new_version is None:
+            if self.old_version is None:
                 raise ManifestDiffAnalysisError(
-                    "Invalid updated dependency state"
+                    "Updated dependency requires old_version"
+                )
+            if self.new_version is None:
+                raise ManifestDiffAnalysisError(
+                    "Updated dependency requires new_version"
                 )
 
     def to_dict(self) -> dict[str, object]:
@@ -419,12 +426,17 @@ class ManifestDependencyChange:
 class ManifestDiff:
     path: str
     manager: str | None
-    dependency_changes: tuple[ManifestDependencyChange, ...]
+    dependency_changes: tuple[
+        ManifestDependencyChange,
+        ...
+    ]
     changed_lines: tuple[str, ...] = ()
     supported: bool = True
 
     def __post_init__(self) -> None:
-        normalized = _normalize_relative_path(self.path)
+        normalized = _normalize_relative_path(
+            self.path
+        )
 
         if normalized != self.path:
             raise ManifestDiffAnalysisError(
@@ -432,13 +444,17 @@ class ManifestDiff:
             )
 
         if self.manager is not None and not isinstance(
-            self.manager, str
+            self.manager,
+            str,
         ):
             raise ManifestDiffAnalysisError(
                 "manager must be a string or None"
             )
 
-        if not isinstance(self.dependency_changes, tuple):
+        if not isinstance(
+            self.dependency_changes,
+            tuple,
+        ):
             raise ManifestDiffAnalysisError(
                 "dependency_changes must be a tuple"
             )
@@ -448,20 +464,32 @@ class ManifestDiff:
                 "Too many dependency changes"
             )
 
-        if not isinstance(self.changed_lines, tuple):
+        if not isinstance(
+            self.changed_lines,
+            tuple,
+        ):
             raise ManifestDiffAnalysisError(
                 "changed_lines must be a tuple"
             )
 
-        if len(self.changed_lines) > MAX_LINES:
+        if len(self.changed_lines) > MAX_ITEMS:
             raise ManifestDiffAnalysisError(
                 "Too many changed lines"
             )
 
         if type(self.supported) is not bool:
             raise ManifestDiffAnalysisError(
-                "supported must be a boolean"
+                "supported must be boolean"
             )
+
+        for item in self.dependency_changes:
+            if not isinstance(
+                item,
+                ManifestDependencyChange,
+            ):
+                raise ManifestDiffAnalysisError(
+                    "Invalid dependency change"
+                )
 
         for line in self.changed_lines:
             if not isinstance(line, str):
@@ -478,7 +506,9 @@ class ManifestDiff:
                 item.to_dict()
                 for item in self.dependency_changes
             ],
-            "changed_lines": list(self.changed_lines),
+            "changed_lines": list(
+                self.changed_lines
+            ),
         }
 
 
@@ -491,10 +521,12 @@ class ManifestDiffAnalysisResult:
     safe: bool = True
 
     def __post_init__(self) -> None:
-        # IMPORTANT:
         # repository_root is an absolute filesystem path.
-        # It must NOT be passed to _normalize_relative_path().
-        if not isinstance(self.repository_root, str):
+        # It must NOT be validated as a relative manifest path.
+        if not isinstance(
+            self.repository_root,
+            str,
+        ):
             raise ManifestDiffAnalysisError(
                 "repository_root must be a string"
             )
@@ -504,13 +536,6 @@ class ManifestDiffAnalysisResult:
                 "repository_root must not be empty"
             )
 
-        root = Path(self.repository_root)
-
-        if not root.is_absolute():
-            raise ManifestDiffAnalysisError(
-                "repository_root must be absolute"
-            )
-
         if len(self.repository_root) > MAX_PATH_LENGTH:
             raise ManifestDiffAnalysisError(
                 "repository_root is too long"
@@ -518,7 +543,14 @@ class ManifestDiffAnalysisResult:
 
         if _NULL in self.repository_root:
             raise ManifestDiffAnalysisError(
-                "repository_root contains a NULL character"
+                "repository_root contains NULL"
+            )
+
+        root = Path(self.repository_root)
+
+        if not root.is_absolute():
+            raise ManifestDiffAnalysisError(
+                "repository_root must be absolute"
             )
 
         if not isinstance(self.manifests, tuple):
@@ -526,12 +558,18 @@ class ManifestDiffAnalysisResult:
                 "manifests must be a tuple"
             )
 
-        if not isinstance(self.unrelated_changes, tuple):
+        if not isinstance(
+            self.unrelated_changes,
+            tuple,
+        ):
             raise ManifestDiffAnalysisError(
                 "unrelated_changes must be a tuple"
             )
 
-        if not isinstance(self.redacted_diff, str):
+        if not isinstance(
+            self.redacted_diff,
+            str,
+        ):
             raise ManifestDiffAnalysisError(
                 "redacted_diff must be a string"
             )
@@ -543,17 +581,20 @@ class ManifestDiffAnalysisResult:
 
         if type(self.safe) is not bool:
             raise ManifestDiffAnalysisError(
-                "safe must be a boolean"
+                "safe must be boolean"
             )
 
         for item in self.manifests:
-            if not isinstance(item, ManifestDiff):
+            if not isinstance(
+                item,
+                ManifestDiff,
+            ):
                 raise ManifestDiffAnalysisError(
-                    "Invalid ManifestDiff item"
+                    "Invalid manifest result"
                 )
 
-        for item in self.unrelated_changes:
-            _normalize_relative_path(item)
+        for path in self.unrelated_changes:
+            _normalize_relative_path(path)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -562,7 +603,9 @@ class ManifestDiffAnalysisResult:
                 item.to_dict()
                 for item in self.manifests
             ],
-            "unrelated_changes": list(self.unrelated_changes),
+            "unrelated_changes": list(
+                self.unrelated_changes
+            ),
             "redacted_diff": self.redacted_diff,
             "safe": self.safe,
         }
@@ -577,40 +620,40 @@ class ManifestDiffAnalysisResult:
 def _extract_blocks(
     diff_text: str,
 ) -> list[tuple[str, list[str]]]:
-    blocks: list[tuple[str, list[str]]] = []
+    blocks: list[
+        tuple[str, list[str]]
+    ] = []
+
     current_path: str | None = None
     current_lines: list[str] = []
 
-    for raw_line in diff_text.splitlines():
-        match = _DIFF_FILE_PATTERN.match(raw_line)
+    for line in diff_text.splitlines():
+        match = _DIFF_FILE_PATTERN.match(line)
 
         if match:
             if current_path is not None:
                 blocks.append(
-                    (current_path, current_lines)
+                    (
+                        current_path,
+                        current_lines,
+                    )
                 )
 
-            a_path = match.group("a")
-            b_path = match.group("b")
-
-            if a_path != b_path:
-                current_path = _normalize_relative_path(
-                    b_path
-                )
-            else:
-                current_path = _normalize_relative_path(
-                    b_path
-                )
-
-            current_lines = [raw_line]
+            current_path = _normalize_relative_path(
+                match.group("b")
+            )
+            current_lines = [line]
             continue
 
         if current_path is not None:
-            current_lines.append(raw_line)
+            current_lines.append(line)
 
     if current_path is not None:
         blocks.append(
-            (current_path, current_lines)
+            (
+                current_path,
+                current_lines,
+            )
         )
 
     if len(blocks) > MAX_ITEMS:
@@ -621,41 +664,51 @@ def _extract_blocks(
     return blocks
 
 
-def _line_number_from_hunk(
-    lines: Sequence[str],
+def _start_line(
+    lines: Iterable[str],
 ) -> int:
-    current = 1
-
     for line in lines:
         match = _HUNK_PATTERN.match(line)
         if match:
-            current = int(match.group("new"))
-            break
+            return int(match.group("new"))
 
-    return current
+    return 1
 
 
-def _dependency_changes_from_lines(
-    lines: Sequence[str],
+def _dependency_changes(
+    lines: Iterable[str],
     manager: str,
 ) -> tuple[ManifestDependencyChange, ...]:
-    removed: dict[str, tuple[str, int]] = {}
-    added: dict[str, tuple[str, int]] = {}
+    removed: dict[
+        str,
+        tuple[str, int],
+    ] = {}
 
-    current_line = _line_number_from_hunk(lines)
+    added: dict[
+        str,
+        tuple[str, int],
+    ] = {}
 
-    for raw_line in lines:
-        if raw_line.startswith("@@"):
-            match = _HUNK_PATTERN.match(raw_line)
+    current_line = _start_line(lines)
+
+    for raw in lines:
+        if raw.startswith("@@"):
+            match = _HUNK_PATTERN.match(raw)
             if match:
-                current_line = int(match.group("new"))
+                current_line = int(
+                    match.group("new")
+                )
             continue
 
-        if raw_line.startswith("+++ ") or raw_line.startswith("--- "):
+        if raw.startswith("+++ ") or raw.startswith("--- "):
             continue
 
-        prefix = raw_line[:1]
-        content = raw_line[1:] if prefix in "+-" else raw_line
+        prefix = raw[:1]
+        content = (
+            raw[1:]
+            if prefix in {"+", "-"}
+            else raw
+        )
 
         parsed = _parse_dependency_line(
             content,
@@ -678,24 +731,31 @@ def _dependency_changes_from_lines(
             continue
 
         if prefix == "-":
-            removed[name] = (version, current_line)
+            removed[name] = (
+                version,
+                current_line,
+            )
+
         elif prefix == "+":
-            added[name] = (version, current_line)
+            added[name] = (
+                version,
+                current_line,
+            )
 
         if prefix == "+":
             current_line += 1
 
-    changes: list[ManifestDependencyChange] = []
+    changes: list[
+        ManifestDependencyChange
+    ] = []
 
-    all_names = sorted(
+    for name in sorted(
         set(removed) | set(added)
-    )
-
-    for name in all_names:
+    ):
         old = removed.get(name)
         new = added.get(name)
 
-        if old and new:
+        if old is not None and new is not None:
             changes.append(
                 ManifestDependencyChange(
                     name=name,
@@ -705,7 +765,8 @@ def _dependency_changes_from_lines(
                     line_number=new[1],
                 )
             )
-        elif new:
+
+        elif new is not None:
             changes.append(
                 ManifestDependencyChange(
                     name=name,
@@ -715,7 +776,8 @@ def _dependency_changes_from_lines(
                     line_number=new[1],
                 )
             )
-        elif old:
+
+        elif old is not None:
             changes.append(
                 ManifestDependencyChange(
                     name=name,
@@ -725,11 +787,6 @@ def _dependency_changes_from_lines(
                     line_number=old[1],
                 )
             )
-
-    if len(changes) > MAX_ITEMS:
-        raise ManifestDiffAnalysisError(
-            "Too many dependency changes"
-        )
 
     return tuple(changes)
 
@@ -758,86 +815,96 @@ def analyze_manifest_diff(
         manifest_paths,
     )
 
-    redacted_diff = _redact(diff_text)
-
     blocks = _extract_blocks(
         diff_text
     )
 
     manifest_set = set(manifest_paths)
 
-    manifest_results: list[ManifestDiff] = []
+    results: list[ManifestDiff] = []
     unrelated: list[str] = []
 
     for path, lines in blocks:
-        if path in manifest_set:
-            manager = _manager_for_manifest(path)
-            supported = manager is not None
-
-            if supported and manager is not None:
-                dependency_changes = (
-                    _dependency_changes_from_lines(
-                        lines,
-                        manager,
-                    )
-                )
-            else:
-                dependency_changes = ()
-
-            changed_lines = tuple(
-                _redact(line)
-                for line in lines
-                if line.startswith(("+", "-"))
-                and not line.startswith(("+++", "---"))
-            )
-
-            manifest_results.append(
-                ManifestDiff(
-                    path=path,
-                    manager=manager,
-                    dependency_changes=dependency_changes,
-                    changed_lines=changed_lines,
-                    supported=supported,
-                )
-            )
-        else:
+        if path not in manifest_set:
             unrelated.append(path)
+            continue
 
-    for manifest in manifest_paths:
-        if manifest not in {
-            item.path for item in manifest_results
-        }:
-            manager = _manager_for_manifest(manifest)
+        manager = _manager_for_manifest(path)
+        supported = manager is not None
 
-            manifest_results.append(
-                ManifestDiff(
-                    path=manifest,
-                    manager=manager,
-                    dependency_changes=(),
-                    changed_lines=(),
-                    supported=manager is not None,
-                )
+        changes = (
+            _dependency_changes(
+                lines,
+                manager,
             )
+            if manager is not None
+            else ()
+        )
 
-    # Preserve caller order for manifests.
-    order = {
-        path: index
-        for index, path in enumerate(manifest_paths)
+        changed_lines = tuple(
+            _redact(line)
+            for line in lines
+            if (
+                line.startswith("+")
+                or line.startswith("-")
+            )
+            and not line.startswith(
+                ("+++", "---")
+            )
+        )
+
+        results.append(
+            ManifestDiff(
+                path=path,
+                manager=manager,
+                dependency_changes=changes,
+                changed_lines=changed_lines,
+                supported=supported,
+            )
+        )
+
+    existing = {
+        item.path
+        for item in results
     }
 
-    manifest_results.sort(
-        key=lambda item: order[item.path]
-    )
+    for path in manifest_paths:
+        if path not in existing:
+            results.append(
+                ManifestDiff(
+                    path=path,
+                    manager=_manager_for_manifest(
+                        path
+                    ),
+                    dependency_changes=(),
+                    changed_lines=(),
+                    supported=(
+                        _manager_for_manifest(
+                            path
+                        )
+                        is not None
+                    ),
+                )
+            )
 
-    unrelated_unique = tuple(
-        dict.fromkeys(unrelated)
+    order = {
+        path: index
+        for index, path in enumerate(
+            manifest_paths
+        )
+    }
+
+    results.sort(
+        key=lambda item: order[item.path]
     )
 
     return ManifestDiffAnalysisResult(
         repository_root=str(root),
-        manifests=tuple(manifest_results),
-        unrelated_changes=unrelated_unique,
-        redacted_diff=redacted_diff,
+        manifests=tuple(results),
+        unrelated_changes=tuple(
+            dict.fromkeys(unrelated)
+        ),
+        redacted_diff=_redact(diff_text),
         safe=True,
     )
 
@@ -852,9 +919,15 @@ def validate_manifest_diff_analysis(
         return False
 
     try:
-        _validate_repository_root(
+        root = Path(
             result.repository_root
         )
+
+        if not root.is_absolute():
+            return False
+
+        if not root.exists() or not root.is_dir():
+            return False
 
         ManifestDiffAnalysisResult(
             repository_root=result.repository_root,
@@ -865,7 +938,12 @@ def validate_manifest_diff_analysis(
         )
 
         return True
-    except (ManifestDiffAnalysisError, OSError, RuntimeError):
+
+    except (
+        ManifestDiffAnalysisError,
+        OSError,
+        RuntimeError,
+    ):
         return False
 
 
@@ -892,7 +970,6 @@ def validate_manifest_diff(
 __all__ = [
     "MAX_PATH_LENGTH",
     "MAX_DIFF_LENGTH",
-    "MAX_LINES",
     "MAX_ITEMS",
     "SUPPORTED_MANIFESTS",
     "ManifestDiffAnalysisError",
