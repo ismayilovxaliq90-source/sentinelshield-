@@ -53,50 +53,55 @@ jobs:
               EmergencyStopError,
               EmergencyStopState,
               create_emergency_stop_controller,
+              require_execution_allowed,
+              validate_emergency_stop_readiness,
           )
 
           controller = create_emergency_stop_controller()
 
-          initial = controller.status()
+          ready = validate_emergency_stop_readiness(controller)
 
-          if initial.state is not EmergencyStopState.READY:
+          if ready.state != EmergencyStopState.READY:
               raise SystemExit(
-                  "TASK 195 FAIL: controller not initially READY"
+                  "TASK 195 FAIL: controller is not READY"
               )
 
-          controller.trigger("live safety stop")
+          require_execution_allowed(controller)
 
-          stopped = controller.status()
+          stopped = controller.request_stop(
+              "live safety validation"
+          )
 
-          if not stopped.stopped:
+          if stopped.state != EmergencyStopState.STOP_REQUESTED:
               raise SystemExit(
-                  "TASK 195 FAIL: emergency stop was not activated"
+                  "TASK 195 FAIL: stop request was not recorded"
               )
 
-          if stopped.reason != "live safety stop":
+          if not stopped.stop_requested:
               raise SystemExit(
-                  "TASK 195 FAIL: stop reason was not preserved"
+                  "TASK 195 FAIL: stop flag missing"
               )
 
           try:
-              controller.require_execution_allowed()
+              require_execution_allowed(controller)
           except EmergencyStopError:
               pass
           else:
               raise SystemExit(
-                  "TASK 195 FAIL: execution bypassed emergency stop"
+                  "TASK 195 FAIL: execution was not blocked"
               )
 
-          controller.reset()
+          confirmed = controller.confirm_stopped()
 
-          ready = controller.status()
-
-          if ready.state is not EmergencyStopState.READY:
+          if confirmed.state != EmergencyStopState.STOPPED:
               raise SystemExit(
-                  "TASK 195 FAIL: reset did not restore READY state"
+                  "TASK 195 FAIL: STOPPED state not reached"
               )
 
-          controller.require_execution_allowed()
+          if not confirmed.stopped:
+              raise SystemExit(
+                  "TASK 195 FAIL: stopped flag missing"
+              )
 
           print("TASK 195 PASS")
 

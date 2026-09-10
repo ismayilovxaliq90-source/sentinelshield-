@@ -7,193 +7,168 @@ from sentinelshield.emergency_stop_readiness import (
     EmergencyStopError,
     EmergencyStopState,
     create_emergency_stop_controller,
-    get_emergency_stop_status,
-    reset_emergency_stop,
     require_execution_allowed,
-    trigger_emergency_stop,
+    validate_emergency_stop_readiness,
 )
 
 
-def test_controller_starts_ready():
-    controller = EmergencyStopController()
-
-    status = controller.status()
-
-    assert status.state is EmergencyStopState.READY
-    assert status.stopped is False
-    assert status.reason is None
-    assert status.generation == 0
-
-
-def test_factory_creates_ready_controller():
+def test_new_controller_is_ready():
     controller = create_emergency_stop_controller()
 
-    assert isinstance(controller, EmergencyStopController)
-    assert controller.is_stopped() is False
+    result = controller.status()
+
+    assert result.ready is True
+    assert result.stop_requested is False
+    assert result.stopped is False
+    assert result.state == EmergencyStopState.READY
 
 
-def test_trigger_activates_emergency_stop():
-    controller = EmergencyStopController()
+def test_readiness_validation_accepts_ready_controller():
+    controller = create_emergency_stop_controller()
 
-    status = controller.trigger("resource limit exceeded")
+    result = validate_emergency_stop_readiness(controller)
 
-    assert status.state is EmergencyStopState.STOPPED
-    assert status.stopped is True
-    assert status.reason == "resource limit exceeded"
-    assert status.generation == 1
+    assert result.ready is True
+    assert result.state == EmergencyStopState.READY
 
 
-def test_trigger_blocks_execution():
-    controller = EmergencyStopController()
+def test_execution_is_allowed_when_ready():
+    controller = create_emergency_stop_controller()
 
-    controller.trigger("manual stop")
-
-    with pytest.raises(EmergencyStopError):
-        controller.require_execution_allowed()
+    require_execution_allowed(controller)
 
 
-def test_function_wrapper_blocks_execution():
-    controller = EmergencyStopController()
+def test_request_stop_changes_state():
+    controller = create_emergency_stop_controller()
 
-    trigger_emergency_stop(controller, "security violation")
+    result = controller.request_stop("manual emergency stop")
+
+    assert result.ready is False
+    assert result.stop_requested is True
+    assert result.stopped is False
+    assert result.state == EmergencyStopState.STOP_REQUESTED
+    assert result.reason == "manual emergency stop"
+
+
+def test_request_stop_blocks_execution():
+    controller = create_emergency_stop_controller()
+
+    controller.request_stop("safety trigger")
 
     with pytest.raises(EmergencyStopError):
         require_execution_allowed(controller)
 
 
-def test_reset_restores_ready_state():
-    controller = EmergencyStopController()
+def test_should_stop_is_true_after_request():
+    controller = create_emergency_stop_controller()
 
-    controller.trigger("temporary failure")
-    status = controller.reset()
+    assert controller.should_stop() is False
 
-    assert status.state is EmergencyStopState.READY
-    assert status.stopped is False
-    assert status.reason is None
-    assert status.generation == 2
+    controller.request_stop()
+
+    assert controller.should_stop() is True
 
 
-def test_reset_allows_execution_again():
-    controller = EmergencyStopController()
+def test_confirm_stopped_requires_prior_request():
+    controller = create_emergency_stop_controller()
 
-    controller.trigger("temporary failure")
-    controller.reset()
-
-    require_execution_allowed(controller)
+    with pytest.raises(EmergencyStopError):
+        controller.confirm_stopped()
 
 
-def test_repeated_trigger_does_not_replace_original_reason():
-    controller = EmergencyStopController()
+def test_confirm_stopped_changes_state():
+    controller = create_emergency_stop_controller()
 
-    first = controller.trigger("first reason")
-    second = controller.trigger("second reason")
+    controller.request_stop("resource violation")
+    result = controller.confirm_stopped()
 
-    assert first.reason == "first reason"
+    assert result.state == EmergencyStopState.STOPPED
+    assert result.stop_requested is True
+    assert result.stopped is True
+
+
+def test_stopped_state_blocks_execution():
+    controller = create_emergency_stop_controller()
+
+    controller.request_stop()
+    controller.confirm_stopped()
+
+    with pytest.raises(EmergencyStopError):
+        require_execution_allowed(controller)
+
+
+def test_stop_request_is_idempotent():
+    controller = create_emergency_stop_controller()
+
+    first = controller.request_stop("first reason")
+    second = controller.request_stop("second reason")
+
+    assert first.state == EmergencyStopState.STOP_REQUESTED
+    assert second.state == EmergencyStopState.STOP_REQUESTED
     assert second.reason == "first reason"
-    assert second.generation == 1
+    assert second.requested_at == first.requested_at
 
 
 @pytest.mark.parametrize(
     "reason",
-    ["", "   ", None, 123, b"reason"],
+    ["", "   "],
 )
-def test_invalid_reason_is_rejected(reason):
-    controller = EmergencyStopController()
+def test_empty_reason_is_rejected(reason):
+    controller = create_emergency_stop_controller()
 
     with pytest.raises(EmergencyStopError):
-        controller.trigger(reason)
+        controller.request_stop(reason)
 
 
-def test_null_character_in_reason_is_rejected():
-    controller = EmergencyStopController()
+@pytest.mark.parametrize(
+    "reason",
+    [None, 123, b"stop"],
+)
+def test_invalid_reason_type_is_rejected(reason):
+    controller = create_emergency_stop_controller()
 
     with pytest.raises(EmergencyStopError):
-        controller.trigger("unsafe\x00reason")
-
-
-def test_reason_is_trimmed():
-    controller = EmergencyStopController()
-
-    status = controller.trigger("   emergency condition   ")
-
-    assert status.reason == "emergency condition"
-
-
-def test_status_wrapper():
-    controller = EmergencyStopController()
-
-    status = get_emergency_stop_status(controller)
-
-    assert status.to_dict() == {
-        "state": "READY",
-        "stopped": False,
-        "reason": None,
-        "generation": 0,
-    }
-
-
-def test_trigger_wrapper():
-    controller = EmergencyStopController()
-
-    status = trigger_emergency_stop(
-        controller,
-        "operator requested stop",
-    )
-
-    assert status.stopped is True
-    assert status.reason == "operator requested stop"
-
-
-def test_reset_wrapper():
-    controller = EmergencyStopController()
-
-    trigger_emergency_stop(controller, "stop")
-    status = reset_emergency_stop(controller)
-
-    assert status.stopped is False
+        controller.request_stop(reason)
 
 
 def test_invalid_controller_is_rejected():
     with pytest.raises(EmergencyStopError):
-        get_emergency_stop_status(object())
+        validate_emergency_stop_readiness(object())
 
-    with pytest.raises(EmergencyStopError):
-        trigger_emergency_stop(object(), "reason")
 
-    with pytest.raises(EmergencyStopError):
-        reset_emergency_stop(object())
-
+def test_require_execution_allowed_rejects_invalid_controller():
     with pytest.raises(EmergencyStopError):
         require_execution_allowed(object())
 
 
-def test_to_dict_contains_expected_fields():
-    controller = EmergencyStopController()
-
-    controller.trigger("test stop")
+def test_status_to_dict_is_stable():
+    controller = create_emergency_stop_controller()
 
     data = controller.status().to_dict()
 
-    assert data["state"] == "STOPPED"
-    assert data["stopped"] is True
-    assert data["reason"] == "test stop"
-    assert data["generation"] == 1
+    assert data == {
+        "ready": True,
+        "stop_requested": False,
+        "stopped": False,
+        "state": "READY",
+        "reason": "",
+    }
 
 
-def test_concurrent_triggers_remain_consistent():
-    controller = EmergencyStopController()
+def test_concurrent_stop_requests_are_safe():
+    controller = create_emergency_stop_controller()
 
     errors = []
 
-    def trigger() -> None:
+    def request():
         try:
-            controller.trigger("concurrent stop")
+            controller.request_stop("concurrent stop")
         except Exception as error:
             errors.append(error)
 
     threads = [
-        threading.Thread(target=trigger)
-        for _ in range(20)
+        threading.Thread(target=request)
+        for _ in range(32)
     ]
 
     for thread in threads:
@@ -203,33 +178,41 @@ def test_concurrent_triggers_remain_consistent():
         thread.join()
 
     assert errors == []
-
-    status = controller.status()
-
-    assert status.stopped is True
-    assert status.reason == "concurrent stop"
-    assert status.generation == 1
+    assert controller.should_stop() is True
+    assert controller.state == EmergencyStopState.STOP_REQUESTED
 
 
-def test_reset_after_concurrent_trigger_is_consistent():
-    controller = EmergencyStopController()
+def test_stop_state_never_implicitly_resets():
+    controller = create_emergency_stop_controller()
 
-    threads = [
-        threading.Thread(
-            target=controller.trigger,
-            args=("stop",),
-        )
-        for _ in range(10)
-    ]
+    controller.request_stop("emergency")
+    controller.status()
+    controller.status()
 
-    for thread in threads:
-        thread.start()
+    assert controller.state == EmergencyStopState.STOP_REQUESTED
+    assert controller.should_stop() is True
 
-    for thread in threads:
-        thread.join()
 
-    status = controller.reset()
+def test_validation_after_stop_request():
+    controller = create_emergency_stop_controller()
 
-    assert status.state is EmergencyStopState.READY
-    assert status.stopped is False
-    assert status.reason is None
+    controller.request_stop("validation")
+
+    result = validate_emergency_stop_readiness(controller)
+
+    assert result.state == EmergencyStopState.STOP_REQUESTED
+    assert result.stop_requested is True
+    assert result.stopped is False
+
+
+def test_validation_after_confirmed_stop():
+    controller = create_emergency_stop_controller()
+
+    controller.request_stop("confirmed")
+    controller.confirm_stopped()
+
+    result = validate_emergency_stop_readiness(controller)
+
+    assert result.state == EmergencyStopState.STOPPED
+    assert result.stop_requested is True
+    assert result.stopped is True
