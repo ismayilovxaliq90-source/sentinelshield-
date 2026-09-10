@@ -1,0 +1,135 @@
+name: TASK 180 - Tool Version Validation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-180:
+    name: TASK 180 - Tool Version Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install pytest on GitHub runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      # ======================================================
+      # REAL TASK 180 EXECUTION
+      # ======================================================
+
+      - name: Validate tool versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "TASK 180 — TOOL VERSION VALIDATION"
+          echo "ENVIRONMENT: GITHUB ACTIONS SERVER"
+          echo "=================================================="
+
+          echo
+          echo "Python:"
+          python --version
+          command -v python
+
+          echo
+          echo "Node:"
+          node --version
+          command -v node
+
+          echo
+          echo "npm:"
+          npm --version
+          command -v npm
+
+          echo
+          echo "Git:"
+          git --version
+          command -v git
+
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+
+          python \
+            scripts/task_180_validate_tool_versions.py
+
+      # ======================================================
+      # REAL TASK 180 TESTS
+      # ======================================================
+
+      - name: Run Task 180 unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+
+          python -m pytest \
+            tests/test_tool_version_validation.py \
+            -q
+
+      # ======================================================
+      # EVIDENCE
+      # ======================================================
+
+      - name: Generate Task 180 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/task-180
+
+          {
+            echo "TASK=180"
+            echo "NAME=Tool Version Validation"
+            echo "EXECUTION_ENVIRONMENT=GitHub Actions"
+            echo "RUNNER_OS=${RUNNER_OS}"
+            echo "RUNNER_ARCH=${RUNNER_ARCH}"
+            echo "PYTHON_VERSION=$(python --version 2>&1)"
+            echo "NODE_VERSION=$(node --version)"
+            echo "NPM_VERSION=$(npm --version)"
+            echo "GIT_VERSION=$(git --version)"
+            echo "PYTHON_PATH=$(command -v python)"
+            echo "NODE_PATH=$(command -v node)"
+            echo "NPM_PATH=$(command -v npm)"
+            echo "GIT_PATH=$(command -v git)"
+            echo "JOB_STATUS=${{ job.status }}"
+          } > artifacts/task-180/execution-evidence.txt
+
+          cat artifacts/task-180/execution-evidence.txt
+
+      - name: Upload Task 180 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-180-tool-version-evidence
+          path: artifacts/task-180/
