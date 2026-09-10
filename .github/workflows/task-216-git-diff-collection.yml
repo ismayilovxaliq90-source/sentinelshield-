@@ -1,0 +1,191 @@
+name: Task 216 - Git Diff Collection
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/git_diff_collection.py"
+      - "tests/test_git_diff_collection.py"
+      - ".github/workflows/task-216-git-diff-collection.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/git_diff_collection.py"
+      - "tests/test_git_diff_collection.py"
+      - ".github/workflows/task-216-git-diff-collection.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/src
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  task-216:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Prepare environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python --version
+          git --version
+
+      - name: Syntax validation without bytecode
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          import ast
+          from pathlib import Path
+
+          files = [
+              Path("src/sentinelshield/git_diff_collection.py"),
+              Path("tests/test_git_diff_collection.py"),
+          ]
+
+          for path in files:
+              ast.parse(
+                  path.read_text(encoding="utf-8"),
+                  filename=str(path),
+              )
+
+          print("TASK 216 syntax validation: PASS")
+          PY
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Import validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          from sentinelshield.git_diff_collection import (
+              GitDiffCollectionError,
+              GitDiffCollectionResult,
+              GitDiffFile,
+              collect_git_diff,
+              collect_git_diff_collection,
+              validate_git_diff_collection,
+          )
+
+          print("TASK 216 import validation: PASS")
+          PY
+
+      - name: Task 216 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B -m pytest \
+            tests/test_git_diff_collection.py \
+            -q
+
+      - name: Live Git diff validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          from sentinelshield.git_diff_collection import collect_git_diff
+
+          with tempfile.TemporaryDirectory() as temp:
+              root = Path(temp)
+
+              subprocess.run(
+                  ["git", "init", "-q", "-b", "main"],
+                  cwd=root,
+                  check=True,
+              )
+              subprocess.run(
+                  ["git", "config", "user.email", "task216@example.invalid"],
+                  cwd=root,
+                  check=True,
+              )
+              subprocess.run(
+                  ["git", "config", "user.name", "Task 216"],
+                  cwd=root,
+                  check=True,
+              )
+
+              target = root / "fixture.txt"
+              target.write_text("baseline\n", encoding="utf-8")
+
+              subprocess.run(
+                  ["git", "add", "."],
+                  cwd=root,
+                  check=True,
+              )
+              subprocess.run(
+                  ["git", "commit", "-q", "-m", "baseline"],
+                  cwd=root,
+                  check=True,
+              )
+
+              target.write_text(
+                  "baseline\nchanged\n",
+                  encoding="utf-8",
+              )
+
+              result = collect_git_diff(root)
+
+              assert result.has_changes is True
+              assert result.changed_files == 1
+              assert result.files[0].path == "fixture.txt"
+              assert result.files[0].status == "modified"
+              assert result.additions == 1
+
+          print("TASK 216 live Git diff validation: PASS")
+          PY
+
+      - name: Bytecode protection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain -- \
+              '*.pyc' \
+              '*.pyo' \
+              '*.pyd'; then
+            :
+          fi
+
+          if git status --porcelain -- \
+              '*.pyc' \
+              '*.pyo' \
+              '*.pyd' | grep -q .; then
+            echo "Unexpected bytecode changes detected"
+            exit 1
+          fi
+
+          echo "TASK 216 bytecode protection: PASS"
+
+      - name: Final task status
+        run: |
+          echo "TASK 216 - GIT DIFF COLLECTION: PASS"
