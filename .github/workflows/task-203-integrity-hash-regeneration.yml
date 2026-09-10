@@ -1,0 +1,144 @@
+name: TASK 203 - Integrity Hash Regeneration
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/integrity_hash_regeneration.py"
+      - "tests/test_integrity_hash_regeneration.py"
+      - ".github/workflows/task-203-integrity-hash-regeneration.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/integrity_hash_regeneration.py"
+      - "tests/test_integrity_hash_regeneration.py"
+      - ".github/workflows/task-203-integrity-hash-regeneration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-203:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Verify module import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.integrity_hash_regeneration"
+
+      - name: Run TASK 203 unit tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_integrity_hash_regeneration.py
+
+      - name: Execute real integrity/hash validation
+        run: |
+          set -euo pipefail
+
+          FIXTURE="$RUNNER_TEMP/task-203-fixture"
+          rm -rf "$FIXTURE"
+          mkdir -p "$FIXTURE"
+          cd "$FIXTURE"
+
+          git init -q
+
+          printf '%s\n' '{"name":"task-203","version":"1.0.0"}' \
+            > package.json
+
+          printf '%s\n' '{"lockfileVersion":3,"packages":{}}' \
+            > package-lock.json
+
+          cat > "$RUNNER_TEMP/task_203_live_check.py" <<PY
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "${GITHUB_WORKSPACE}/src")
+
+          from sentinelshield.integrity_hash_regeneration import (
+              IntegrityHashRequest,
+              regenerate_integrity_hashes,
+              validate_integrity_result,
+          )
+
+          root = Path("${FIXTURE}")
+
+          files = (
+              root / "package.json",
+              root / "package-lock.json",
+          )
+
+          result = regenerate_integrity_hashes(
+              IntegrityHashRequest(
+                  repository_root=root,
+                  paths=files,
+              )
+          )
+
+          if not validate_integrity_result(result):
+              raise SystemExit(
+                  "TASK 203 FAIL: result validation failed"
+              )
+
+          if not result.success:
+              raise SystemExit(
+                  "TASK 203 FAIL: integrity regeneration failed"
+              )
+
+          if len(result.hashes) != 2:
+              raise SystemExit(
+                  "TASK 203 FAIL: expected two integrity hashes"
+              )
+
+          for item in result.hashes:
+              if len(item.digest) != 64:
+                  raise SystemExit(
+                      "TASK 203 FAIL: invalid SHA-256 digest"
+                  )
+
+              expected = hashlib.sha256(
+                  item.path.read_bytes()
+              ).hexdigest()
+
+              if item.digest != expected:
+                  raise SystemExit(
+                      "TASK 203 FAIL: digest mismatch"
+                  )
+
+          print("TASK 203 PASS")
+          for item in result.hashes:
+              print(item.path.name, item.digest)
+          PY
+
+          PYTHONPATH="$GITHUB_WORKSPACE/src" \
+          PYTHONDONTWRITEBYTECODE=1 \
+          python "$RUNNER_TEMP/task_203_live_check.py"
+
+          rm -f "$RUNNER_TEMP/task_203_live_check.py"
+
+      - name: Verify no repository bytecode changes
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain=v1 | grep -E '(^|[[:space:]])[^[:space:]]*\.pyc$|__pycache__'; then
+            echo "TASK 203 FAIL: bytecode changes detected"
+            exit 1
+          fi
+
+          echo "TASK 203 bytecode verification PASS"
