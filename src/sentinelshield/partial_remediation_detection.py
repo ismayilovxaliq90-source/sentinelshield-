@@ -3,10 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
-import os
-from pathlib import Path
-import subprocess
-from typing import Iterable, Mapping, Sequence
+from pathlib import PurePosixPath
+from typing import Iterable
 
 
 MAX_PATH_LENGTH = 4096
@@ -14,7 +12,7 @@ MAX_ITEMS = 10000
 
 
 class PartialRemediationDetectionError(ValueError):
-    """Raised when partial-remediation input is invalid."""
+    """Raised when TASK 214 input is invalid."""
 
 
 class RemediationState(str, Enum):
@@ -24,35 +22,41 @@ class RemediationState(str, Enum):
     UNEXPECTED_CHANGE = "UNEXPECTED_CHANGE"
 
 
-def _validate_relative_path(value: object) -> str:
+def _normalize_path(value: object) -> str:
     if not isinstance(value, str):
-        raise PartialRemediationDetectionError("path must be a string")
+        raise PartialRemediationDetectionError(
+            "change path must be a string"
+        )
 
     if not value or not value.strip():
-        raise PartialRemediationDetectionError("path must not be empty")
+        raise PartialRemediationDetectionError(
+            "change path must not be empty"
+        )
 
     if len(value) > MAX_PATH_LENGTH:
-        raise PartialRemediationDetectionError("path is too long")
+        raise PartialRemediationDetectionError(
+            "change path is too long"
+        )
 
-    path = Path(value)
+    normalized = value.replace("\\", "/")
+
+    path = PurePosixPath(normalized)
 
     if path.is_absolute():
         raise PartialRemediationDetectionError(
             "absolute paths are not allowed"
         )
 
-    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
 
-    if normalized.startswith("../") or normalized == "..":
+    if any(part == ".." for part in parts):
         raise PartialRemediationDetectionError(
             "parent traversal is not allowed"
         )
 
-    parts = [part for part in normalized.split("/") if part]
-
-    if ".." in parts:
+    if normalized in {".", "./"}:
         raise PartialRemediationDetectionError(
-            "parent traversal is not allowed"
+            "repository root is not a file change"
         )
 
     return normalized
@@ -61,57 +65,35 @@ def _validate_relative_path(value: object) -> str:
 def _normalize_paths(values: Iterable[str]) -> frozenset[str]:
     if isinstance(values, (str, bytes)):
         raise PartialRemediationDetectionError(
-            "paths must be an iterable of strings"
+            "paths must be an iterable, not a string"
         )
+
+    try:
+        iterator = iter(values)
+    except TypeError as error:
+        raise PartialRemediationDetectionError(
+            "paths must be iterable"
+        ) from error
 
     result: set[str] = set()
 
-    for value in values:
-        result.add(_validate_relative_path(value))
+    for value in iterator:
+        result.add(_normalize_path(value))
 
         if len(result) > MAX_ITEMS:
             raise PartialRemediationDetectionError(
-                "too many paths"
+                "too many change paths"
             )
 
     return frozenset(result)
 
 
-def _normalize_mapping(
-    values: Mapping[str, str],
-) -> dict[str, str]:
-    if not isinstance(values, Mapping):
-        raise PartialRemediationDetectionError(
-            "expected mapping"
-        )
-
-    result: dict[str, str] = {}
-
-    for key, value in values.items():
-        normalized_key = _validate_relative_path(key)
-
-        if not isinstance(value, str):
-            raise PartialRemediationDetectionError(
-                "mapping values must be strings"
-            )
-
-        if len(value) > MAX_PATH_LENGTH:
-            raise PartialRemediationDetectionError(
-                "mapping value is too long"
-            )
-
-        result[normalized_key] = value
-
-        if len(result) > MAX_ITEMS:
-            raise PartialRemediationDetectionError(
-                "too many mapping entries"
-            )
-
-    return result
-
-
 @dataclass(frozen=True)
 class PartialRemediationResult:
+    """
+    Immutable result of TASK 214 partial-remediation detection.
+    """
+
     state: RemediationState
     expected_changes: frozenset[str]
     actual_changes: frozenset[str]
@@ -121,6 +103,11 @@ class PartialRemediationResult:
     failure_category: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.state, RemediationState):
+            raise PartialRemediationDetectionError(
+                "invalid remediation state"
+            )
+
         expected = _normalize_paths(self.expected_changes)
         actual = _normalize_paths(self.actual_changes)
         applied = _normalize_paths(self.applied_changes)
@@ -133,16 +120,12 @@ class PartialRemediationResult:
         object.__setattr__(self, "missing_changes", missing)
         object.__setattr__(self, "unexpected_changes", unexpected)
 
-        if not isinstance(self.state, RemediationState):
-            raise PartialRemediationDetectionError(
-                "invalid remediation state"
-            )
-
         if self.failure_category is not None:
             if not isinstance(self.failure_category, str):
                 raise PartialRemediationDetectionError(
                     "failure_category must be a string or None"
                 )
+
             if len(self.failure_category) > 128:
                 raise PartialRemediationDetectionError(
                     "failure_category is too long"
@@ -172,35 +155,31 @@ class PartialRemediationResult:
                 "actual_changes is inconsistent"
             )
 
-        if unexpected and self.state != RemediationState.UNEXPECTED_CHANGE:
+        if unexpected:
+            expected_state = RemediationState.UNEXPECTED_CHANGE
+        elif not expected and not actual:
+            expected_state = RemediationState.NO_CHANGE
+        elif not missing:
+            expected_state = RemediationState.COMPLETE
+        else:
+            expected_state = RemediationState.PARTIAL
+
+        if self.state is not expected_state:
             raise PartialRemediationDetectionError(
-                "unexpected changes require UNEXPECTED_CHANGE state"
+                "remediation state is inconsistent"
             )
-
-        if not unexpected:
-            if not expected and not actual:
-                expected_state = RemediationState.NO_CHANGE
-            elif not missing:
-                expected_state = RemediationState.COMPLETE
-            else:
-                expected_state = RemediationState.PARTIAL
-
-            if self.state != expected_state:
-                raise PartialRemediationDetectionError(
-                    "remediation state is inconsistent"
-                )
 
     @property
     def is_partial(self) -> bool:
-        return self.state == RemediationState.PARTIAL
+        return self.state is RemediationState.PARTIAL
 
     @property
     def is_complete(self) -> bool:
-        return self.state == RemediationState.COMPLETE
+        return self.state is RemediationState.COMPLETE
 
     @property
     def is_safe(self) -> bool:
-        return self.state != RemediationState.UNEXPECTED_CHANGE
+        return self.state is not RemediationState.UNEXPECTED_CHANGE
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -230,6 +209,13 @@ def detect_partial_remediation(
     *,
     failure_category: str | None = None,
 ) -> PartialRemediationResult:
+    """
+    Compare expected remediation changes with actual changes.
+
+    This function performs classification only.
+    It does not modify files, execute remediation, or rollback changes.
+    """
+
     expected = _normalize_paths(expected_changes)
     actual = _normalize_paths(actual_changes)
 
@@ -258,7 +244,7 @@ def detect_partial_remediation(
 
 
 def validate_partial_remediation(
-    result: PartialRemediationResult,
+    result: object,
 ) -> bool:
     if not isinstance(result, PartialRemediationResult):
         return False
@@ -273,114 +259,14 @@ def validate_partial_remediation(
             unexpected_changes=result.unexpected_changes,
             failure_category=result.failure_category,
         )
-    except (TypeError, ValueError, PartialRemediationDetectionError):
+    except (
+        TypeError,
+        ValueError,
+        PartialRemediationDetectionError,
+    ):
         return False
 
     return True
-
-
-def _repository_root(start_path: str | os.PathLike[str]) -> Path:
-    root = Path(start_path).expanduser().resolve()
-
-    if not root.exists() or not root.is_dir():
-        raise PartialRemediationDetectionError(
-            "repository path must be an existing directory"
-        )
-
-    completed = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        shell=False,
-        timeout=10.0,
-        check=False,
-    )
-
-    if completed.returncode != 0:
-        raise PartialRemediationDetectionError(
-            "path is not a Git repository"
-        )
-
-    return Path(completed.stdout.strip()).resolve()
-
-
-def collect_repository_changes(
-    start_path: str | os.PathLike[str],
-) -> frozenset[str]:
-    root = _repository_root(start_path)
-
-    completed = subprocess.run(
-        ["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        shell=False,
-        timeout=10.0,
-        check=False,
-    )
-
-    if completed.returncode != 0:
-        raise PartialRemediationDetectionError(
-            "unable to collect Git changes"
-        )
-
-    changes: set[str] = set()
-
-    for line in completed.stdout.splitlines():
-        if not line.strip():
-            continue
-
-        if len(line) < 4:
-            raise PartialRemediationDetectionError(
-                "invalid Git status entry"
-            )
-
-        status_path = line[3:]
-
-        # Rename/copy entries contain "old -> new".
-        if " -> " in status_path:
-            status_path = status_path.split(" -> ", 1)[1]
-
-        if status_path.startswith('"') and status_path.endswith('"'):
-            status_path = status_path[1:-1]
-
-        relative = _validate_relative_path(status_path)
-
-        candidate = (root / relative).resolve()
-
-        try:
-            candidate.relative_to(root)
-        except ValueError as error:
-            raise PartialRemediationDetectionError(
-                "Git change escapes repository"
-            ) from error
-
-        changes.add(relative)
-
-        if len(changes) > MAX_ITEMS:
-            raise PartialRemediationDetectionError(
-                "too many Git changes"
-            )
-
-    return frozenset(changes)
-
-
-def detect_repository_partial_remediation(
-    start_path: str | os.PathLike[str],
-    expected_changes: Iterable[str],
-    *,
-    failure_category: str | None = None,
-) -> PartialRemediationResult:
-    actual = collect_repository_changes(start_path)
-
-    return detect_partial_remediation(
-        expected_changes,
-        actual,
-        failure_category=failure_category,
-    )
 
 
 __all__ = [
@@ -389,6 +275,4 @@ __all__ = [
     "PartialRemediationResult",
     "detect_partial_remediation",
     "validate_partial_remediation",
-    "collect_repository_changes",
-    "detect_repository_partial_remediation",
 ]

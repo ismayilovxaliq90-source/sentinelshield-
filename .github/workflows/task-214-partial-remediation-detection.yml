@@ -23,11 +23,12 @@ env:
 
 jobs:
   task-214:
+    name: TASK 214 validation
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Setup Python
@@ -35,15 +36,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Validate task files
+      - name: Verify required files
         run: |
           test -f src/sentinelshield/partial_remediation_detection.py
           test -f tests/test_partial_remediation_detection.py
 
-      - name: Syntax validation without bytecode writes
+      - name: Syntax validation
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-
           python -B - <<'PY'
           import ast
           import os
@@ -57,10 +56,8 @@ jobs:
           ]
 
           for path in files:
-              ast.parse(
-                  path.read_text(encoding="utf-8"),
-                  filename=str(path),
-              )
+              source = path.read_text(encoding="utf-8")
+              ast.parse(source, filename=str(path))
               print(f"SYNTAX OK: {path}")
 
           print("TASK 214 syntax validation: PASS")
@@ -68,8 +65,6 @@ jobs:
 
       - name: Import validation
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-
           python -B - <<'PY'
           import sentinelshield
           import sentinelshield.partial_remediation_detection as module
@@ -80,8 +75,6 @@ jobs:
               "PartialRemediationResult",
               "detect_partial_remediation",
               "validate_partial_remediation",
-              "collect_repository_changes",
-              "detect_repository_partial_remediation",
           ]
 
           missing = [
@@ -94,22 +87,20 @@ jobs:
                   f"Missing TASK 214 API: {missing}"
               )
 
-          print("TASK 214 import/integration validation: PASS")
+          print("TASK 214 import validation: PASS")
           PY
 
-      - name: Install test dependency
+      - name: Install pytest
         run: |
           python -m pip install --disable-pip-version-check pytest
 
       - name: Run TASK 214 tests
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          python -B -m pytest -q tests/test_partial_remediation_detection.py
+          python -B -m pytest -q \
+            tests/test_partial_remediation_detection.py
 
-      - name: Live partial-remediation validation
+      - name: Live complete remediation check
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-
           python -B - <<'PY'
           from sentinelshield.partial_remediation_detection import (
               RemediationState,
@@ -123,21 +114,19 @@ jobs:
               ],
               actual_changes=[
                   "package.json",
-          ],
+                  "package-lock.json",
+              ],
           )
 
-          assert result.state is RemediationState.PARTIAL
-          assert result.applied_changes == {"package.json"}
-          assert result.missing_changes == {"package-lock.json"}
-          assert not result.unexpected_changes
+          assert result.state is RemediationState.COMPLETE
+          assert result.missing_changes == frozenset()
+          assert result.unexpected_changes == frozenset()
 
-          print("LIVE PARTIAL REMEDIATION CHECK: PASS")
+          print("LIVE COMPLETE REMEDIATION CHECK: PASS")
           PY
 
-      - name: Live unexpected-change validation
+      - name: Live partial remediation check
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-
           python -B - <<'PY'
           from sentinelshield.partial_remediation_detection import (
               RemediationState,
@@ -145,15 +134,44 @@ jobs:
           )
 
           result = detect_partial_remediation(
-              expected_changes=["package.json"],
+              expected_changes=[
+                  "package.json",
+                  "package-lock.json",
+              ],
               actual_changes=[
                   "package.json",
-                  "unexpected.txt",
+              ],
+          )
+
+          assert result.state is RemediationState.PARTIAL
+          assert result.applied_changes == {"package.json"}
+          assert result.missing_changes == {"package-lock.json"}
+          assert result.unexpected_changes == frozenset()
+
+          print("LIVE PARTIAL REMEDIATION CHECK: PASS")
+          PY
+
+      - name: Live unexpected-change check
+        run: |
+          python -B - <<'PY'
+          from sentinelshield.partial_remediation_detection import (
+              RemediationState,
+              detect_partial_remediation,
+          )
+
+          result = detect_partial_remediation(
+              expected_changes=[
+                  "package.json",
+              ],
+              actual_changes=[
+                  "package.json",
+                  "README.md",
               ],
           )
 
           assert result.state is RemediationState.UNEXPECTED_CHANGE
-          assert result.unexpected_changes == {"unexpected.txt"}
+          assert result.applied_changes == {"package.json"}
+          assert result.unexpected_changes == {"README.md"}
           assert result.is_safe is False
 
           print("LIVE UNEXPECTED CHANGE CHECK: PASS")
