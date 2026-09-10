@@ -11,29 +11,25 @@ from sentinelshield.tool_version_validation import (
 
 
 def main() -> int:
-    # These are tools that the Task 176-179 execution chain
-    # needs on the isolated CI/server environment.
+    # These are the baseline tools required by the CI
+    # execution environment for the current server pipeline.
     request = ToolVersionValidationInput(
-        requirements=(
+        tools=(
             ToolVersionRequirement(
-                name="python",
-                min_version="3.10.0",
-                required=True,
+                name="python3",
+                min_version="3.11.0",
             ),
             ToolVersionRequirement(
                 name="node",
                 min_version="18.0.0",
-                required=True,
             ),
             ToolVersionRequirement(
                 name="npm",
                 min_version="9.0.0",
-                required=True,
             ),
             ToolVersionRequirement(
                 name="git",
                 min_version="2.0.0",
-                required=True,
             ),
         ),
         timeout_seconds=10.0,
@@ -41,29 +37,26 @@ def main() -> int:
 
     result = validate_tool_versions(request)
 
-    payload = {
+    evidence = {
         "task": 180,
         "task_name": "Tool Version Validation",
         "execution_environment": "GitHub Actions",
         "valid": result.valid,
-        "requested_count": result.requested_count,
-        "available_count": result.available_count,
-        "valid_count": result.valid_count,
-        "invalid_count": result.invalid_count,
-        "missing_count": result.missing_count,
         "reason": result.reason,
+        "total_count": result.total_count,
+        "available_count": result.available_count,
+        "compatible_count": result.compatible_count,
+        "missing_count": result.missing_count,
+        "incompatible_count": result.incompatible_count,
         "tools": [
             {
                 "name": item.name,
+                "required": item.required,
                 "available": item.available,
                 "executable": item.executable,
                 "version": item.version,
-                "normalized_version": (
-                    list(item.normalized_version)
-                    if item.normalized_version is not None
-                    else None
-                ),
-                "valid": item.valid,
+                "version_tuple": item.version_tuple,
+                "compatible": item.compatible,
                 "reason": item.reason,
             }
             for item in result.tools
@@ -72,7 +65,7 @@ def main() -> int:
 
     print(
         json.dumps(
-            payload,
+            evidence,
             indent=2,
             sort_keys=True,
         )

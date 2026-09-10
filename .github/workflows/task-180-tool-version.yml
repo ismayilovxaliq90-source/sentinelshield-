@@ -43,7 +43,7 @@ jobs:
           python -m pip install pytest
 
       # ======================================================
-      # REAL TASK 180 EXECUTION
+      # TASK 180 — REAL SERVER EXECUTION
       # ======================================================
 
       - name: Validate tool versions
@@ -53,46 +53,45 @@ jobs:
 
           echo "=================================================="
           echo "TASK 180 — TOOL VERSION VALIDATION"
-          echo "ENVIRONMENT: GITHUB ACTIONS SERVER"
+          echo "EXECUTION ENVIRONMENT: GITHUB ACTIONS SERVER"
           echo "=================================================="
 
           echo
-          echo "Python:"
-          python --version
-          command -v python
+          echo "--- Runtime versions supplied by runner ---"
 
-          echo
-          echo "Node:"
+          python3 --version
           node --version
-          command -v node
-
-          echo
-          echo "npm:"
           npm --version
-          command -v npm
+          git --version
 
           echo
-          echo "Git:"
-          git --version
+          echo "--- Executable locations ---"
+
+          command -v python3
+          command -v node
+          command -v npm
           command -v git
+
+          echo
+          echo "--- SentinelShield Task 180 ---"
 
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
-          python \
+          python3 \
             scripts/task_180_validate_tool_versions.py
 
       # ======================================================
-      # REAL TASK 180 TESTS
+      # TASK 180 — TESTS
       # ======================================================
 
-      - name: Run Task 180 unit tests
+      - name: Run Task 180 tests
         shell: bash
         run: |
           set -euo pipefail
 
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
-          python -m pytest \
+          python3 -m pytest \
             tests/test_tool_version_validation.py \
             -q
 
@@ -114,11 +113,11 @@ jobs:
             echo "EXECUTION_ENVIRONMENT=GitHub Actions"
             echo "RUNNER_OS=${RUNNER_OS}"
             echo "RUNNER_ARCH=${RUNNER_ARCH}"
-            echo "PYTHON_VERSION=$(python --version 2>&1)"
+            echo "PYTHON_VERSION=$(python3 --version)"
             echo "NODE_VERSION=$(node --version)"
             echo "NPM_VERSION=$(npm --version)"
             echo "GIT_VERSION=$(git --version)"
-            echo "PYTHON_PATH=$(command -v python)"
+            echo "PYTHON_PATH=$(command -v python3)"
             echo "NODE_PATH=$(command -v node)"
             echo "NPM_PATH=$(command -v npm)"
             echo "GIT_PATH=$(command -v git)"

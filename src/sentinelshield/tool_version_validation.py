@@ -9,12 +9,7 @@ from typing import Optional, Tuple
 
 
 class ToolVersionValidationError(ValueError):
-    """Raised when Task 180 input is invalid."""
-
-
-_VERSION_RE = re.compile(
-    r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$"
-)
+    """Invalid Task 180 input."""
 
 
 @dataclass(frozen=True)
@@ -26,37 +21,44 @@ class ToolVersionRequirement:
 
 
 @dataclass(frozen=True)
-class ToolVersionValidationInput:
-    requirements: Tuple[ToolVersionRequirement, ...]
-    timeout_seconds: float = 10.0
-
-
-@dataclass(frozen=True)
 class ToolVersionResult:
     name: str
+    required: bool
     available: bool
     executable: Optional[str]
     version: Optional[str]
-    normalized_version: Optional[Tuple[int, int, int]]
-    valid: bool
+    version_tuple: Optional[Tuple[int, int, int]]
+    compatible: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class ToolVersionValidationInput:
+    tools: Tuple[ToolVersionRequirement, ...]
+    timeout_seconds: float = 10.0
 
 
 @dataclass(frozen=True)
 class ToolVersionValidationResult:
     valid: bool
     tools: Tuple[ToolVersionResult, ...]
-    requested_count: int
+    total_count: int
     available_count: int
-    valid_count: int
-    invalid_count: int
+    compatible_count: int
     missing_count: int
+    incompatible_count: int
     reason: str
 
 
-def _parse_version(
-    value: str,
-) -> Tuple[int, int, int]:
+_VERSION_RE = re.compile(
+    r"^[vV]?(\d+)"
+    r"(?:\.(\d+))?"
+    r"(?:\.(\d+))?"
+    r"(?:[-+].*)?$"
+)
+
+
+def _parse_version(value: str) -> Tuple[int, int, int]:
     if not isinstance(value, str):
         raise ToolVersionValidationError(
             "VERSION_MUST_BE_STRING"
@@ -91,7 +93,7 @@ def _validate_requirement(
         ToolVersionRequirement,
     ):
         raise TypeError(
-            "REQUIREMENT_MUST_BE_TOOL_VERSION_REQUIREMENT"
+            "TOOL_REQUIREMENT_MUST_BE_TOOL_VERSION_REQUIREMENT"
         )
 
     if not isinstance(requirement.name, str):
@@ -107,19 +109,15 @@ def _validate_requirement(
         )
 
     if (
-        requirement.min_version is not None
-        and not isinstance(requirement.min_version, str)
-    ):
-        raise TypeError(
-            "MIN_VERSION_MUST_BE_STRING_OR_NONE"
+        "/" in name
+        or "\\" in name
+        or any(
+            character.isspace()
+            for character in name
         )
-
-    if (
-        requirement.max_version is not None
-        and not isinstance(requirement.max_version, str)
     ):
-        raise TypeError(
-            "MAX_VERSION_MUST_BE_STRING_OR_NONE"
+        raise ToolVersionValidationError(
+            "INVALID_TOOL_NAME"
         )
 
     if not isinstance(requirement.required, bool):
@@ -127,35 +125,26 @@ def _validate_requirement(
             "REQUIRED_MUST_BE_BOOLEAN"
         )
 
-    minimum = (
+    if requirement.min_version is not None:
         _parse_version(requirement.min_version)
-        if requirement.min_version is not None
-        else None
-    )
 
-    maximum = (
+    if requirement.max_version is not None:
         _parse_version(requirement.max_version)
-        if requirement.max_version is not None
-        else None
-    )
 
     if (
-        minimum is not None
-        and maximum is not None
-        and maximum < minimum
+        requirement.min_version is not None
+        and requirement.max_version is not None
+        and _parse_version(requirement.min_version)
+        > _parse_version(requirement.max_version)
     ):
         raise ToolVersionValidationError(
-            "MAX_VERSION_MUST_NOT_BE_LESS_THAN_MIN_VERSION"
+            "MIN_VERSION_MUST_NOT_EXCEED_MAX_VERSION"
         )
 
     return ToolVersionRequirement(
         name=name,
-        min_version=requirement.min_version.strip()
-        if requirement.min_version is not None
-        else None,
-        max_version=requirement.max_version.strip()
-        if requirement.max_version is not None
-        else None,
+        min_version=requirement.min_version,
+        max_version=requirement.max_version,
         required=requirement.required,
     )
 
@@ -171,22 +160,22 @@ def _validate_input(
             "INPUT_MUST_BE_TOOL_VERSION_VALIDATION_INPUT"
         )
 
-    if not isinstance(request.requirements, tuple):
+    if not isinstance(request.tools, tuple):
         raise TypeError(
-            "REQUIREMENTS_MUST_BE_TUPLE"
+            "TOOLS_MUST_BE_TUPLE"
         )
 
-    if not request.requirements:
+    if not request.tools:
         raise ToolVersionValidationError(
-            "REQUIREMENTS_ARE_EMPTY"
+            "TOOL_REQUIREMENT_LIST_IS_EMPTY"
         )
 
     normalized = tuple(
-        _validate_requirement(item)
-        for item in request.requirements
+        _validate_requirement(tool)
+        for tool in request.tools
     )
 
-    names = [item.name.casefold() for item in normalized]
+    names = [tool.name.casefold() for tool in normalized]
 
     if len(names) != len(set(names)):
         raise ToolVersionValidationError(
@@ -209,12 +198,14 @@ def _validate_input(
         )
 
     return ToolVersionValidationInput(
-        requirements=normalized,
-        timeout_seconds=float(request.timeout_seconds),
+        tools=normalized,
+        timeout_seconds=float(
+            request.timeout_seconds
+        ),
     )
 
 
-def _get_tool_version(
+def _read_tool_version(
     executable: str,
     timeout_seconds: float,
 ) -> str:
@@ -243,20 +234,50 @@ def _get_tool_version(
             "VERSION_COMMAND_OS_ERROR"
         ) from exc
 
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
-
-    output = stdout or stderr
+    output = (
+        (completed.stdout or "").strip()
+        or (completed.stderr or "").strip()
+    )
 
     if not output:
         raise ToolVersionValidationError(
             "VERSION_OUTPUT_EMPTY"
         )
 
-    return output.splitlines()[0].strip()
+    # Use the first non-empty line because some tools
+    # print additional diagnostic information.
+    for line in output.splitlines():
+        line = line.strip()
+        if line:
+            return line
+
+    raise ToolVersionValidationError(
+        "VERSION_OUTPUT_EMPTY"
+    )
 
 
-def _validate_one(
+def _version_compatible(
+    actual: Tuple[int, int, int],
+    requirement: ToolVersionRequirement,
+) -> bool:
+    if requirement.min_version is not None:
+        minimum = _parse_version(
+            requirement.min_version
+        )
+        if actual < minimum:
+            return False
+
+    if requirement.max_version is not None:
+        maximum = _parse_version(
+            requirement.max_version
+        )
+        if actual > maximum:
+            return False
+
+    return True
+
+
+def _check_tool(
     requirement: ToolVersionRequirement,
     timeout_seconds: float,
 ) -> ToolVersionResult:
@@ -265,80 +286,71 @@ def _validate_one(
     if executable is None:
         return ToolVersionResult(
             name=requirement.name,
+            required=requirement.required,
             available=False,
             executable=None,
             version=None,
-            normalized_version=None,
-            valid=not requirement.required,
-            reason=(
-                "OPTIONAL_TOOL_NOT_FOUND"
-                if not requirement.required
-                else "REQUIRED_TOOL_NOT_FOUND"
-            ),
+            version_tuple=None,
+            compatible=False,
+            reason="TOOL_NOT_FOUND",
         )
 
     try:
-        version = _get_tool_version(
+        raw_version = _read_tool_version(
             executable,
             timeout_seconds,
         )
 
-        normalized = _parse_version(version)
+        # Version command output may contain a prefix such as
+        # "git version 2.51.0". Extract the first semantic-looking
+        # version safely.
+        match = re.search(
+            r"[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?",
+            raw_version,
+        )
+
+        if not match:
+            raise ToolVersionValidationError(
+                "VERSION_NOT_DETECTABLE"
+            )
+
+        parsed = (
+            int(match.group(1)),
+            int(match.group(2) or 0),
+            int(match.group(3) or 0),
+        )
+
+        compatible = _version_compatible(
+            parsed,
+            requirement,
+        )
+
+        return ToolVersionResult(
+            name=requirement.name,
+            required=requirement.required,
+            available=True,
+            executable=executable,
+            version=raw_version,
+            version_tuple=parsed,
+            compatible=compatible,
+            reason=(
+                "TOOL_VERSION_COMPATIBLE"
+                if compatible
+                else "TOOL_VERSION_INCOMPATIBLE"
+            ),
+        )
 
     except ToolVersionValidationError as exc:
         return ToolVersionResult(
             name=requirement.name,
+            required=requirement.required,
             available=True,
             executable=executable,
             version=None,
-            normalized_version=None,
-            valid=False,
+            version_tuple=None,
+            compatible=False,
             reason=str(exc),
         )
-
-    minimum = (
-        _parse_version(requirement.min_version)
-        if requirement.min_version is not None
-        else None
-    )
-
-    maximum = (
-        _parse_version(requirement.max_version)
-        if requirement.max_version is not None
-        else None
-    )
-
-    if minimum is not None and normalized < minimum:
-        return ToolVersionResult(
-            name=requirement.name,
-            available=True,
-            executable=executable,
-            version=version,
-            normalized_version=normalized,
-            valid=False,
-            reason="VERSION_BELOW_MINIMUM",
-        )
-
-    if maximum is not None and normalized > maximum:
-        return ToolVersionResult(
-            name=requirement.name,
-            available=True,
-            executable=executable,
-            version=version,
-            normalized_version=normalized,
-            valid=False,
-            reason="VERSION_ABOVE_MAXIMUM",
-        )
-
-    return ToolVersionResult(
-        name=requirement.name,
-        available=True,
-        executable=executable,
-        version=version,
-        normalized_version=normalized,
-        valid=True,
-        reason="TOOL_VERSION_VALID",
-    )
 
 
 def validate_tool_versions(
@@ -347,25 +359,19 @@ def validate_tool_versions(
     request = _validate_input(request)
 
     results = tuple(
-        _validate_one(
-            requirement,
+        _check_tool(
+            tool,
             request.timeout_seconds,
         )
-        for requirement in request.requirements
+        for tool in request.tools
     )
 
     available_count = sum(
-        item.available
-        for item in results
+        item.available for item in results
     )
 
-    valid_count = sum(
-        item.valid
-        for item in results
-    )
-
-    invalid_count = sum(
-        item.available and not item.valid
+    compatible_count = sum(
+        item.available and item.compatible
         for item in results
     )
 
@@ -374,28 +380,38 @@ def validate_tool_versions(
         for item in results
     )
 
+    incompatible_count = sum(
+        item.available and not item.compatible
+        for item in results
+    )
+
+    # Required tools must exist and have compatible versions.
+    # Optional tools do not invalidate the complete result when
+    # absent or incompatible.
     valid = all(
-        item.valid
+        (
+            not item.required
+            or (
+                item.available
+                and item.compatible
+            )
+        )
         for item in results
     )
 
     if valid:
-        reason = "ALL_TOOL_VERSIONS_VALID"
-    elif missing_count:
-        reason = "REQUIRED_TOOL_MISSING"
-    elif invalid_count:
-        reason = "TOOL_VERSION_VALIDATION_FAILED"
+        reason = "ALL_REQUIRED_TOOL_VERSIONS_VALID"
     else:
-        reason = "TOOL_VERSION_VALIDATION_FAILED"
+        reason = "REQUIRED_TOOL_VERSION_VALIDATION_FAILED"
 
     return ToolVersionValidationResult(
         valid=valid,
         tools=results,
-        requested_count=len(results),
+        total_count=len(results),
         available_count=available_count,
-        valid_count=valid_count,
-        invalid_count=invalid_count,
+        compatible_count=compatible_count,
         missing_count=missing_count,
+        incompatible_count=incompatible_count,
         reason=reason,
     )
 
