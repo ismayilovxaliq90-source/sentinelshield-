@@ -32,7 +32,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: Run Task 188 tests
+      - name: Verify Task 188 test file
+        run: |
+          test -f tests/test_command_allowlist_validation.py
+
+      - name: Run ONLY Task 188 tests
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_command_allowlist_validation.py
@@ -55,6 +59,7 @@ jobs:
           )
 
           assert allowed.allowed is True
+          assert allowed.executable == "git"
           assert allowed.reason == "COMMAND_ALLOWED"
 
           denied = validate_command_allowlist(
@@ -63,6 +68,7 @@ jobs:
           )
 
           assert denied.allowed is False
+          assert denied.executable == "rm"
           assert denied.reason == "EXECUTABLE_NOT_ALLOWED"
 
           print("TASK 188 LIVE VALIDATION PASS")
@@ -77,3 +83,10 @@ jobs:
           fi
 
           echo "BYTECODE CHECK PASS"
+
+      - name: Task 188 PASS
+        run: |
+          echo "========================================"
+          echo "TASK 188 — COMMAND ALLOWLIST VALIDATION"
+          echo "PASS"
+          echo "========================================"
