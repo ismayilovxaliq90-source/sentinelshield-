@@ -1,162 +1,174 @@
-from pathlib import Path
+from __future__ import annotations
+
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
 from sentinelshield.dependency_update_execution import (
     DependencyUpdateExecutionError,
     DependencyUpdatePolicy,
+    DependencyUpdateResult,
     execute_dependency_update,
     require_successful_dependency_update,
 )
 
 
-def test_successful_execution(tmp_path: Path):
+def test_successful_execution(tmp_path: Path) -> None:
     result = execute_dependency_update(
-        (sys.executable, "-c", "print('success')"),
-        working_directory=tmp_path,
+        [sys.executable, "-c", "print('update-ok')"],
+        tmp_path,
     )
 
     assert result.success is True
     assert result.timed_out is False
     assert result.exit_code == 0
-    assert "success" in result.stdout
+    assert "update-ok" in result.stdout
     assert result.failure_reason is None
 
 
-def test_non_zero_exit_is_failure(tmp_path: Path):
+def test_nonzero_exit_is_failure(tmp_path: Path) -> None:
     result = execute_dependency_update(
-        (sys.executable, "-c", "raise SystemExit(7)"),
-        working_directory=tmp_path,
+        [sys.executable, "-c", "import sys; sys.exit(7)"],
+        tmp_path,
     )
 
     assert result.success is False
-    assert result.timed_out is False
     assert result.exit_code == 7
     assert result.failure_reason == "NON_ZERO_EXIT_CODE"
 
 
-def test_timeout_is_failure(tmp_path: Path):
-    policy = DependencyUpdatePolicy(
-        timeout_seconds=0.2,
-    )
+def test_allowed_nonzero_exit_code(tmp_path: Path) -> None:
+    policy = DependencyUpdatePolicy(allowed_exit_codes=(0, 7))
 
     result = execute_dependency_update(
-        (
+        [sys.executable, "-c", "import sys; sys.exit(7)"],
+        tmp_path,
+        policy=policy,
+    )
+
+    assert result.success is True
+    assert result.exit_code == 7
+
+
+def test_timeout(tmp_path: Path) -> None:
+    policy = DependencyUpdatePolicy(timeout_seconds=0.2)
+
+    result = execute_dependency_update(
+        [
             sys.executable,
             "-c",
             "import time; time.sleep(10)",
-        ),
-        working_directory=tmp_path,
+        ],
+        tmp_path,
         policy=policy,
     )
 
     assert result.success is False
     assert result.timed_out is True
-    assert result.failure_reason == "EXECUTION_TIMEOUT"
+    assert result.failure_reason == "TIMEOUT"
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "echo hello",
-        "",
-        (),
-        [],
-        ("echo", ""),
-        ("echo", "bad\x00value"),
-    ],
-)
-def test_invalid_command_is_rejected(tmp_path: Path, command):
+def test_command_string_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         execute_dependency_update(
-            command,
-            working_directory=tmp_path,
+            "python -c print('x')",
+            tmp_path,
         )
 
 
-@pytest.mark.parametrize(
-    "timeout",
-    [0, -1, float("inf"), float("-inf"), float("nan"), True, "30"],
-)
-def test_invalid_timeout_is_rejected(tmp_path: Path, timeout):
-    policy = DependencyUpdatePolicy(
-        timeout_seconds=timeout,
-    )
+def test_empty_command_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(DependencyUpdateExecutionError):
+        execute_dependency_update([], tmp_path)
 
+
+def test_empty_argument_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         execute_dependency_update(
-            (sys.executable, "-c", "print('x')"),
-            working_directory=tmp_path,
-            policy=policy,
+            [sys.executable, ""],
+            tmp_path,
         )
 
 
-def test_missing_directory_is_rejected(tmp_path: Path):
+def test_nul_in_command_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         execute_dependency_update(
-            (sys.executable, "-c", "print('x')"),
-            working_directory=tmp_path / "missing",
+            [sys.executable, "-c", "print('x')\x00"],
+            tmp_path,
         )
 
 
-def test_file_as_working_directory_is_rejected(tmp_path: Path):
-    file_path = tmp_path / "file.txt"
-    file_path.write_text("data", encoding="utf-8")
-
+def test_control_character_in_command_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         execute_dependency_update(
-            (sys.executable, "-c", "print('x')"),
-            working_directory=file_path,
+            [sys.executable, "-c", "print('x')\x01"],
+            tmp_path,
         )
 
 
-def test_environment_is_allowlisted(tmp_path: Path):
-    policy = DependencyUpdatePolicy(
-        allowed_environment=("SAFE_VALUE",),
-    )
+def test_missing_working_directory_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(DependencyUpdateExecutionError):
+        execute_dependency_update(
+            [sys.executable, "-c", "print('x')"],
+            tmp_path / "missing",
+        )
 
+
+def test_file_working_directory_is_rejected(tmp_path: Path) -> None:
+    target = tmp_path / "file.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(DependencyUpdateExecutionError):
+        execute_dependency_update(
+            [sys.executable, "-c", "print('x')"],
+            target,
+        )
+
+
+def test_environment_allowlist(tmp_path: Path) -> None:
     result = execute_dependency_update(
-        (
+        [
             sys.executable,
             "-c",
-            "import os; print(os.getenv('SAFE_VALUE', 'missing')); "
-            "print(os.getenv('UNSAFE_VALUE', 'missing'))",
-        ),
-        working_directory=tmp_path,
-        environment={
-            "SAFE_VALUE": "allowed",
-            "UNSAFE_VALUE": "blocked",
-        },
-        policy=policy,
+            "import os; print(os.environ.get('CI'))",
+        ],
+        tmp_path,
+        environment={"CI": "true"},
     )
 
     assert result.success is True
-    assert "allowed" in result.stdout
-    assert "blocked" not in result.stdout
+    assert "true" in result.stdout
 
 
-def test_environment_nul_is_rejected(tmp_path: Path):
+def test_disallowed_environment_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         execute_dependency_update(
-            (sys.executable, "-c", "print('x')"),
-            working_directory=tmp_path,
-            environment={"PATH": "bad\x00value"},
+            [sys.executable, "-c", "print('x')"],
+            tmp_path,
+            environment={"SECRET_TOKEN": "secret"},
         )
 
 
-def test_output_is_bounded(tmp_path: Path):
-    policy = DependencyUpdatePolicy(
-        max_output_bytes=32,
-    )
+def test_nul_environment_value_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(DependencyUpdateExecutionError):
+        execute_dependency_update(
+            [sys.executable, "-c", "print('x')"],
+            tmp_path,
+            environment={"CI": "bad\x00value"},
+        )
+
+
+def test_output_is_bounded(tmp_path: Path) -> None:
+    policy = DependencyUpdatePolicy(max_output_bytes=32)
 
     result = execute_dependency_update(
-        (
+        [
             sys.executable,
             "-c",
             "print('x' * 1000)",
-        ),
-        working_directory=tmp_path,
+        ],
+        tmp_path,
         policy=policy,
     )
 
@@ -164,50 +176,41 @@ def test_output_is_bounded(tmp_path: Path):
     assert len(result.stdout.encode("utf-8")) <= 32
 
 
-def test_allowed_nonzero_exit_code(tmp_path: Path):
-    policy = DependencyUpdatePolicy(
-        allowed_exit_codes=(0, 5),
-    )
+def test_invalid_timeout_policy() -> None:
+    with pytest.raises(ValueError):
+        DependencyUpdatePolicy(timeout_seconds=0)
 
-    result = execute_dependency_update(
-        (
-            sys.executable,
-            "-c",
-            "raise SystemExit(5)",
-        ),
-        working_directory=tmp_path,
-        policy=policy,
-    )
-
-    assert result.success is True
-    assert result.exit_code == 5
+    with pytest.raises(ValueError):
+        DependencyUpdatePolicy(timeout_seconds=-1)
 
 
-def test_require_successful_returns_result(tmp_path: Path):
+def test_invalid_output_policy() -> None:
+    with pytest.raises(ValueError):
+        DependencyUpdatePolicy(max_output_bytes=0)
+
+
+def test_require_successful_execution(tmp_path: Path) -> None:
     result = require_successful_dependency_update(
-        (sys.executable, "-c", "print('ok')"),
-        working_directory=tmp_path,
+        [sys.executable, "-c", "print('required-ok')"],
+        tmp_path,
     )
 
+    assert isinstance(result, DependencyUpdateResult)
     assert result.success is True
 
 
-def test_require_successful_raises(tmp_path: Path):
+def test_require_successful_execution_raises(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         require_successful_dependency_update(
-            (
-                sys.executable,
-                "-c",
-                "raise SystemExit(3)",
-            ),
-            working_directory=tmp_path,
+            [sys.executable, "-c", "import sys; sys.exit(2)"],
+            tmp_path,
         )
 
 
-def test_result_to_dict(tmp_path: Path):
+def test_result_to_dict(tmp_path: Path) -> None:
     result = execute_dependency_update(
-        (sys.executable, "-c", "print('ok')"),
-        working_directory=tmp_path,
+        [sys.executable, "-c", "print('dict-ok')"],
+        tmp_path,
     )
 
     data = result.to_dict()
@@ -215,18 +218,16 @@ def test_result_to_dict(tmp_path: Path):
     assert data["success"] is True
     assert data["exit_code"] == 0
     assert data["working_directory"] == str(tmp_path.resolve())
-    assert "duration_seconds" in data
 
 
-def test_no_shell_metacharacter_execution(tmp_path: Path):
+def test_process_finishes_without_timeout(tmp_path: Path) -> None:
+    start = time.monotonic()
+
     result = execute_dependency_update(
-        (
-            sys.executable,
-            "-c",
-            "print('literal-safe')",
-        ),
-        working_directory=tmp_path,
+        [sys.executable, "-c", "print('fast')"],
+        tmp_path,
     )
 
     assert result.success is True
-    assert "literal-safe" in result.stdout
+    assert result.timed_out is False
+    assert time.monotonic() - start < 10

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from collections.abc import Mapping, Sequence
-import math
 import os
 import signal
 import subprocess
 import time
+from dataclasses import dataclass
+from math import isfinite
+from pathlib import Path
+from typing import Mapping, Sequence
 
 
-class DependencyUpdateExecutionError(RuntimeError):
-    """Unsafe or invalid dependency-update execution request."""
+class DependencyUpdateExecutionError(ValueError):
+    """Raised when dependency update execution input is unsafe or invalid."""
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,38 @@ class DependencyUpdatePolicy:
         "CI",
     )
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.timeout_seconds, (int, float))
+            or isinstance(self.timeout_seconds, bool)
+            or not isfinite(float(self.timeout_seconds))
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a finite positive number")
+
+        if (
+            not isinstance(self.max_output_bytes, int)
+            or isinstance(self.max_output_bytes, bool)
+            or self.max_output_bytes <= 0
+        ):
+            raise ValueError("max_output_bytes must be a positive integer")
+
+        if not self.allowed_exit_codes:
+            raise ValueError("allowed_exit_codes must not be empty")
+
+        for code in self.allowed_exit_codes:
+            if not isinstance(code, int) or isinstance(code, bool):
+                raise ValueError("allowed_exit_codes must contain integers")
+
+        if not self.allowed_environment:
+            raise ValueError("allowed_environment must not be empty")
+
+        for name in self.allowed_environment:
+            if not isinstance(name, str) or not name:
+                raise ValueError("environment names must be non-empty strings")
+            if "\x00" in name:
+                raise ValueError("environment names must not contain NUL")
+
 
 @dataclass(frozen=True)
 class DependencyUpdateResult:
@@ -39,7 +71,7 @@ class DependencyUpdateResult:
     working_directory: str
     failure_reason: str | None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return {
             "success": self.success,
             "timed_out": self.timed_out,
@@ -52,91 +84,41 @@ class DependencyUpdateResult:
         }
 
 
-def _validate_policy(policy: DependencyUpdatePolicy) -> DependencyUpdatePolicy:
-    if not isinstance(policy, DependencyUpdatePolicy):
-        raise DependencyUpdateExecutionError(
-            "policy must be DependencyUpdatePolicy"
-        )
-
-    timeout = policy.timeout_seconds
-
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-        raise DependencyUpdateExecutionError(
-            "timeout_seconds must be numeric"
-        )
-
-    timeout = float(timeout)
-
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise DependencyUpdateExecutionError(
-            "timeout_seconds must be finite and greater than zero"
-        )
-
-    if (
-        isinstance(policy.max_output_bytes, bool)
-        or not isinstance(policy.max_output_bytes, int)
-        or policy.max_output_bytes <= 0
-    ):
-        raise DependencyUpdateExecutionError(
-            "max_output_bytes must be positive integer"
-        )
-
-    if not policy.allowed_exit_codes:
-        raise DependencyUpdateExecutionError(
-            "allowed_exit_codes must not be empty"
-        )
-
-    for code in policy.allowed_exit_codes:
-        if isinstance(code, bool) or not isinstance(code, int):
-            raise DependencyUpdateExecutionError(
-                "allowed_exit_codes must contain integers"
-            )
-
-    for name in policy.allowed_environment:
-        if not isinstance(name, str) or not name:
-            raise DependencyUpdateExecutionError(
-                "allowed_environment contains invalid name"
-            )
-        if "\x00" in name:
-            raise DependencyUpdateExecutionError(
-                "allowed_environment contains NUL"
-            )
-
-    return policy
-
-
 def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(command, (str, bytes)):
+    if isinstance(command, (str, bytes, bytearray)):
         raise DependencyUpdateExecutionError(
-            "command must be a sequence, not a string"
+            "command must be a sequence of arguments, not a string"
         )
 
     try:
         values = tuple(command)
     except TypeError as exc:
         raise DependencyUpdateExecutionError(
-            "command must be an iterable sequence"
+            "command must be a sequence of arguments"
         ) from exc
 
     if not values:
-        raise DependencyUpdateExecutionError(
-            "command must not be empty"
-        )
+        raise DependencyUpdateExecutionError("command must not be empty")
 
-    for index, value in enumerate(values):
-        if not isinstance(value, str):
+    for index, argument in enumerate(values):
+        if not isinstance(argument, str):
             raise DependencyUpdateExecutionError(
-                f"command[{index}] must be string"
+                f"command argument {index} must be a string"
             )
 
-        if not value:
+        if not argument:
             raise DependencyUpdateExecutionError(
-                f"command[{index}] must not be empty"
+                f"command argument {index} must not be empty"
             )
 
-        if "\x00" in value:
+        if "\x00" in argument:
             raise DependencyUpdateExecutionError(
-                f"command[{index}] contains NUL"
+                f"command argument {index} contains NUL character"
+            )
+
+        if any(ord(char) < 32 and char not in "\t" for char in argument):
+            raise DependencyUpdateExecutionError(
+                f"command argument {index} contains a control character"
             )
 
     return values
@@ -145,58 +127,80 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
 def _validate_working_directory(
     working_directory: str | os.PathLike[str],
 ) -> Path:
-    try:
-        path = Path(working_directory).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+    if isinstance(working_directory, (str, os.PathLike)):
+        raw = os.fspath(working_directory)
+    else:
         raise DependencyUpdateExecutionError(
-            "working directory cannot be resolved"
-        ) from exc
-
-    if not path.is_dir():
-        raise DependencyUpdateExecutionError(
-            "working directory must be a directory"
+            "working_directory must be a path"
         )
 
-    return path
+    if "\x00" in raw:
+        raise DependencyUpdateExecutionError(
+            "working_directory contains NUL character"
+        )
+
+    path = Path(raw)
+
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise DependencyUpdateExecutionError(
+            "working_directory does not exist"
+        ) from exc
+    except OSError as exc:
+        raise DependencyUpdateExecutionError(
+            "unable to resolve working_directory"
+        ) from exc
+
+    if not resolved.is_dir():
+        raise DependencyUpdateExecutionError(
+            "working_directory must be a directory"
+        )
+
+    return resolved
 
 
 def _build_environment(
     environment: Mapping[str, str] | None,
-    allowed_names: tuple[str, ...],
+    policy: DependencyUpdatePolicy,
 ) -> dict[str, str]:
-    source = os.environ if environment is None else environment
+    allowed = set(policy.allowed_environment)
 
-    if not isinstance(source, Mapping):
-        raise DependencyUpdateExecutionError(
-            "environment must be a mapping"
-        )
+    if environment is None:
+        source = os.environ
+    else:
+        if not isinstance(environment, Mapping):
+            raise DependencyUpdateExecutionError(
+                "environment must be a mapping"
+            )
+        source = environment
 
     result: dict[str, str] = {}
 
-    for name in allowed_names:
-        if name not in source:
-            continue
+    for name, value in source.items():
+        if not isinstance(name, str):
+            raise DependencyUpdateExecutionError(
+                "environment variable names must be strings"
+            )
 
-        value = source[name]
+        if name not in allowed:
+            raise DependencyUpdateExecutionError(
+                f"environment variable is not allowed: {name}"
+            )
 
         if not isinstance(value, str):
             raise DependencyUpdateExecutionError(
-                f"environment value for {name!r} must be string"
+                f"environment value must be a string: {name}"
             )
 
         if "\x00" in value:
             raise DependencyUpdateExecutionError(
-                f"environment value for {name!r} contains NUL"
+                f"environment value contains NUL: {name}"
             )
 
         result[name] = value
 
     return result
-
-
-def _decode_output(data: bytes, maximum: int) -> str:
-    data = data[:maximum]
-    return data.decode("utf-8", errors="replace")
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -206,46 +210,48 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            return
+        return
 
     try:
-        process.wait(timeout=2.0)
+        process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
-            try:
-                process.kill()
-            except ProcessLookupError:
-                return
+            pass
+
+
+def _decode_output(data: bytes, maximum: int) -> str:
+    if len(data) > maximum:
+        data = data[:maximum]
+    return data.decode("utf-8", errors="replace")
 
 
 def execute_dependency_update(
     command: Sequence[str],
-    *,
     working_directory: str | os.PathLike[str],
     environment: Mapping[str, str] | None = None,
     policy: DependencyUpdatePolicy | None = None,
 ) -> DependencyUpdateResult:
-    policy = _validate_policy(
-        policy or DependencyUpdatePolicy()
-    )
+    """
+    Execute an already-authorized dependency update command.
 
-    command_vector = _validate_command(command)
+    This function deliberately uses shell=False and does not perform
+    package-manager command discovery or authorization itself.
+    """
+
+    active_policy = policy or DependencyUpdatePolicy()
+    validated_command = _validate_command(command)
     cwd = _validate_working_directory(working_directory)
-    env = _build_environment(
-        environment,
-        policy.allowed_environment,
-    )
+    env = _build_environment(environment, active_policy)
 
-    started = time.monotonic()
+    start = time.monotonic()
+
+    process: subprocess.Popen[bytes] | None = None
 
     try:
         process = subprocess.Popen(
-            command_vector,
+            validated_command,
             cwd=str(cwd),
             env=env,
             shell=False,
@@ -255,79 +261,97 @@ def execute_dependency_update(
             start_new_session=True,
             close_fds=True,
         )
+
+        try:
+            stdout_data, stderr_data = process.communicate(
+                timeout=active_policy.timeout_seconds
+            )
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process_group(process)
+            stdout_data, stderr_data = process.communicate()
+            timed_out = True
+
+            stdout = _decode_output(
+                stdout_data,
+                active_policy.max_output_bytes,
+            )
+            stderr = _decode_output(
+                stderr_data,
+                active_policy.max_output_bytes,
+            )
+
+            duration = time.monotonic() - start
+
+            return DependencyUpdateResult(
+                success=False,
+                timed_out=True,
+                exit_code=process.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                duration_seconds=duration,
+                working_directory=str(cwd),
+                failure_reason="TIMEOUT",
+            )
+
     except (OSError, ValueError) as exc:
+        duration = time.monotonic() - start
+
         return DependencyUpdateResult(
             success=False,
             timed_out=False,
-            exit_code=None,
+            exit_code=None if process is None else process.returncode,
             stdout="",
             stderr="",
-            duration_seconds=time.monotonic() - started,
+            duration_seconds=duration,
             working_directory=str(cwd),
-            failure_reason=f"EXECUTION_START_FAILED:{type(exc).__name__}",
+            failure_reason=f"EXECUTION_ERROR: {exc}",
         )
 
-    try:
-        stdout, stderr = process.communicate(
-            timeout=float(policy.timeout_seconds)
-        )
+    stdout = _decode_output(
+        stdout_data,
+        active_policy.max_output_bytes,
+    )
+    stderr = _decode_output(
+        stderr_data,
+        active_policy.max_output_bytes,
+    )
 
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_group(process)
-        stdout, stderr = process.communicate()
+    duration = time.monotonic() - start
+    exit_code = process.returncode
 
-        if exc.stdout:
-            stdout = stdout or exc.stdout
-
-        if exc.stderr:
-            stderr = stderr or exc.stderr
-
+    if exit_code in active_policy.allowed_exit_codes:
         return DependencyUpdateResult(
-            success=False,
-            timed_out=True,
-            exit_code=process.returncode,
-            stdout=_decode_output(
-                stdout or b"",
-                policy.max_output_bytes,
-            ),
-            stderr=_decode_output(
-                stderr or b"",
-                policy.max_output_bytes,
-            ),
-            duration_seconds=time.monotonic() - started,
+            success=True,
+            timed_out=timed_out,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_seconds=duration,
             working_directory=str(cwd),
-            failure_reason="EXECUTION_TIMEOUT",
+            failure_reason=None,
         )
-
-    success = process.returncode in policy.allowed_exit_codes
 
     return DependencyUpdateResult(
-        success=success,
+        success=False,
         timed_out=False,
-        exit_code=process.returncode,
-        stdout=_decode_output(
-            stdout,
-            policy.max_output_bytes,
-        ),
-        stderr=_decode_output(
-            stderr,
-            policy.max_output_bytes,
-        ),
-        duration_seconds=time.monotonic() - started,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        duration_seconds=duration,
         working_directory=str(cwd),
-        failure_reason=None if success else "NON_ZERO_EXIT_CODE",
+        failure_reason="NON_ZERO_EXIT_CODE",
     )
 
 
 def require_successful_dependency_update(
     command: Sequence[str],
-    *,
     working_directory: str | os.PathLike[str],
     environment: Mapping[str, str] | None = None,
     policy: DependencyUpdatePolicy | None = None,
 ) -> DependencyUpdateResult:
     result = execute_dependency_update(
-        command,
+        command=command,
         working_directory=working_directory,
         environment=environment,
         policy=policy,

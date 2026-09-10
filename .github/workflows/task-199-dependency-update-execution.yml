@@ -34,99 +34,94 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: Verify import
+      - name: Verify Task 199 tests
         run: |
-          python -c "import sentinelshield.dependency_update_execution"
-
-      - name: Run TASK 199 tests
-        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_dependency_update_execution.py
 
-      - name: Live controlled execution validation
+      - name: Live successful execution validation
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
           python - <<'PY'
           import sys
           import tempfile
-          from pathlib import Path
 
           from sentinelshield.dependency_update_execution import (
-              DependencyUpdateExecutionError,
+              execute_dependency_update,
+          )
+
+          with tempfile.TemporaryDirectory() as workspace:
+              result = execute_dependency_update(
+                  [sys.executable, "-c", "print('TASK 199 LIVE PASS')"],
+                  workspace,
+              )
+
+          if not result.success:
+              print("TASK 199 LIVE FAIL")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          if "TASK 199 LIVE PASS" not in result.stdout:
+              print("TASK 199 LIVE FAIL: expected output missing")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          print("TASK 199 LIVE PASS")
+          print(result.to_dict())
+          PY
+
+      - name: Live timeout validation
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          import sys
+          import tempfile
+
+          from sentinelshield.dependency_update_execution import (
               DependencyUpdatePolicy,
               execute_dependency_update,
           )
 
-          with tempfile.TemporaryDirectory() as directory:
-              workspace = Path(directory)
-
+          with tempfile.TemporaryDirectory() as workspace:
               result = execute_dependency_update(
-                  (
-                      sys.executable,
-                      "-c",
-                      "print('controlled execution')",
-                  ),
-                  working_directory=workspace,
-                  policy=DependencyUpdatePolicy(
-                      timeout_seconds=10.0,
-                  ),
-              )
-
-              if not result.success:
-                  raise SystemExit(
-                      "TASK 199 FAIL: controlled execution failed"
-                  )
-
-              if result.exit_code != 0:
-                  raise SystemExit(
-                      "TASK 199 FAIL: unexpected exit code"
-                  )
-
-              timeout_result = execute_dependency_update(
-                  (
+                  [
                       sys.executable,
                       "-c",
                       "import time; time.sleep(5)",
-                  ),
-                  working_directory=workspace,
-                  policy=DependencyUpdatePolicy(
-                      timeout_seconds=0.2,
-                  ),
+                  ],
+                  workspace,
+                  policy=DependencyUpdatePolicy(timeout_seconds=0.2),
               )
 
-              if not timeout_result.timed_out:
-                  raise SystemExit(
-                      "TASK 199 FAIL: timeout not enforced"
-                  )
+          if result.success:
+              print("TASK 199 TIMEOUT FAIL: command unexpectedly succeeded")
+              print(result.to_dict())
+              raise SystemExit(1)
 
-              try:
-                  execute_dependency_update(
-                      (
-                          sys.executable,
-                          "-c",
-                          "print('x')",
-                      ),
-                      working_directory=workspace,
-                      policy=DependencyUpdatePolicy(
-                          timeout_seconds=0,
-                      ),
-                  )
-              except DependencyUpdateExecutionError:
-                  pass
-              else:
-                  raise SystemExit(
-                      "TASK 199 FAIL: zero timeout accepted"
-                  )
+          if not result.timed_out:
+              print("TASK 199 TIMEOUT FAIL: timeout was not detected")
+              print(result.to_dict())
+              raise SystemExit(1)
 
-          print("TASK 199 PASS")
+          if result.failure_reason != "TIMEOUT":
+              print("TASK 199 TIMEOUT FAIL: wrong failure reason")
+              print(result.to_dict())
+              raise SystemExit(1)
+
+          print("TASK 199 TIMEOUT PASS")
+          print(result.to_dict())
           PY
 
-      - name: Verify no bytecode changes
+      - name: Verify no Python bytecode changes
         run: |
-          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
+          changes="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
 
-          if [ -n "$changed" ]; then
-            echo "TASK 199 FAIL: bytecode changes detected"
-            echo "$changed"
+          if [ -n "$changes" ]; then
+            echo "TASK 199 FAIL: Python bytecode changes detected"
+            printf '%s\n' "$changes"
             exit 1
           fi
 
-          echo "TASK 199 PASS: no bytecode changes"
+          echo "TASK 199 BYTECODE CHECK PASS"
