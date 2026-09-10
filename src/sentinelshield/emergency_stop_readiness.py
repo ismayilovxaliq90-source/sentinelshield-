@@ -23,6 +23,7 @@ class EmergencyStopResult:
     stopped: bool
     state: EmergencyStopState
     reason: str
+    requested_at: float | None
 
     def to_dict(self) -> dict:
         return {
@@ -31,6 +32,7 @@ class EmergencyStopResult:
             "stopped": self.stopped,
             "state": self.state.value,
             "reason": self.reason,
+            "requested_at": self.requested_at,
         }
 
 
@@ -139,6 +141,7 @@ class EmergencyStopController:
             stopped=self._state == EmergencyStopState.STOPPED,
             state=self._state,
             reason=self._reason or "",
+            requested_at=self._requested_at,
         )
 
 
