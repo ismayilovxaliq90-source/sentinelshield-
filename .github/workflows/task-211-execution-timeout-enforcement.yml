@@ -1,0 +1,135 @@
+name: TASK 211 - Execution Timeout Enforcement
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/execution_timeout_enforcement.py"
+      - "tests/test_execution_timeout_enforcement.py"
+      - ".github/workflows/task-211-execution-timeout-enforcement.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/execution_timeout_enforcement.py"
+      - "tests/test_execution_timeout_enforcement.py"
+      - ".github/workflows/task-211-execution-timeout-enforcement.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-211:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Validate repository layout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -d "$GITHUB_WORKSPACE/src/sentinelshield"
+          test -f "$GITHUB_WORKSPACE/src/sentinelshield/execution_timeout_enforcement.py"
+          test -f "$GITHUB_WORKSPACE/tests/test_execution_timeout_enforcement.py"
+
+      - name: Validate import
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -c "import sentinelshield; print(sentinelshield.__file__)"
+          python -c "from sentinelshield.execution_timeout_enforcement import execute_with_timeout; print(execute_with_timeout)"
+
+      - name: Install test dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run TASK 211 unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -m pytest \
+            "$GITHUB_WORKSPACE/tests/test_execution_timeout_enforcement.py" \
+            -q
+
+      - name: Live timeout enforcement validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          from sentinelshield.execution_timeout_enforcement import (
+              execute_with_timeout,
+              validate_timeout_result,
+          )
+
+          with tempfile.TemporaryDirectory(
+              prefix="sentinelshield-task-211-"
+          ) as directory:
+              root = Path(directory)
+
+              result = execute_with_timeout(
+                  [
+                      sys.executable,
+                      "-c",
+                      "import time; time.sleep(10)",
+                  ],
+                  timeout_seconds=0.25,
+                  cwd=root,
+              )
+
+              assert result.status == "TIMEOUT"
+              assert result.timed_out is True
+              assert result.process_terminated is True
+              assert result.elapsed_seconds < 3
+              assert validate_timeout_result(result)
+
+              print("TASK 211 LIVE VALIDATION: PASS")
+              print(f"status={result.status}")
+              print(f"timed_out={result.timed_out}")
+              print(f"process_terminated={result.process_terminated}")
+              print(f"elapsed_seconds={result.elapsed_seconds:.3f}")
+          PY
+
+      - name: Verify no Python bytecode changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git status --short -- \
+              '*.pyc' \
+              '*.pyo' \
+              '__pycache__'; then
+            :
+          fi
+
+          if git status --porcelain=v1 | grep -E '(^|[[:space:]])(.*\.pyc|.*\.pyo)$'; then
+            echo "TASK 211 FAIL: Python bytecode changed"
+            exit 1
+          fi
+
+      - name: Final TASK 211 status
+        run: echo "TASK 211 - Execution Timeout Enforcement - SERVER VALIDATION COMPLETE"
