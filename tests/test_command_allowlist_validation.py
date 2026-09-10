@@ -1,89 +1,63 @@
-from __future__ import annotations
-
 import pytest
 
 from sentinelshield.command_allowlist_validation import (
     CommandAllowlistError,
     CommandAllowlistPolicy,
-    require_allowed_command,
     validate_command_allowlist,
+    require_allowed_command,
 )
 
 
-@pytest.fixture
-def policy() -> CommandAllowlistPolicy:
-    return CommandAllowlistPolicy.from_iterable(
-        {"git", "python3", "node"}
-    )
-
-
-def test_allowed_executable_passes(policy):
+def test_allowed_executable():
+    policy = CommandAllowlistPolicy({"git", "python"})
     result = validate_command_allowlist(["git", "status"], policy)
 
     assert result.allowed is True
     assert result.executable == "git"
-    assert result.reason == "EXECUTABLE_ALLOWLISTED"
-    assert result.command_length == 2
+    assert result.reason == "COMMAND_ALLOWED"
 
 
-def test_non_allowlisted_executable_fails(policy):
-    result = validate_command_allowlist(
-        ["curl", "https://example.com"],
-        policy,
-    )
+def test_denied_executable():
+    policy = CommandAllowlistPolicy({"git"})
+    result = validate_command_allowlist(["rm", "-rf", "/tmp/x"], policy)
 
     assert result.allowed is False
-    assert result.executable == "curl"
-    assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
+    assert result.reason == "EXECUTABLE_NOT_ALLOWED"
 
 
-def test_command_string_is_rejected(policy):
-    result = validate_command_allowlist("git status", policy)
+def test_string_command_is_rejected():
+    policy = CommandAllowlistPolicy({"git"})
 
-    assert result.allowed is False
-    assert result.reason == "COMMAND_MUST_BE_SEQUENCE"
-
-
-def test_bytes_command_is_rejected(policy):
-    result = validate_command_allowlist(b"git status", policy)
-
-    assert result.allowed is False
-    assert result.reason == "COMMAND_MUST_BE_SEQUENCE"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist("git status", policy)
 
 
-def test_none_command_is_rejected(policy):
-    result = validate_command_allowlist(None, policy)
+def test_bytes_command_is_rejected():
+    policy = CommandAllowlistPolicy({"git"})
 
-    assert result.allowed is False
-    assert result.reason == "COMMAND_MUST_BE_SEQUENCE"
-
-
-def test_empty_command_is_rejected(policy):
-    result = validate_command_allowlist([], policy)
-
-    assert result.allowed is False
-    assert result.reason == "COMMAND_IS_EMPTY"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist(b"git status", policy)
 
 
-def test_non_string_element_is_rejected(policy):
-    result = validate_command_allowlist(["git", 123], policy)
+def test_empty_command_is_rejected():
+    policy = CommandAllowlistPolicy({"git"})
 
-    assert result.allowed is False
-    assert result.reason == "COMMAND_ELEMENT_MUST_BE_STRING"
-
-
-def test_empty_element_is_rejected(policy):
-    result = validate_command_allowlist(["git", ""], policy)
-
-    assert result.allowed is False
-    assert result.reason == "COMMAND_ELEMENT_IS_EMPTY"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist([], policy)
 
 
-def test_null_character_is_rejected(policy):
-    result = validate_command_allowlist(["git\x00evil"], policy)
+def test_non_string_argument_is_rejected():
+    policy = CommandAllowlistPolicy({"git"})
 
-    assert result.allowed is False
-    assert result.reason == "NULL_CHARACTER_NOT_ALLOWED"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist(["git", 123], policy)
+
+
+def test_null_character_is_rejected():
+    policy = CommandAllowlistPolicy({"git"})
+
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist(["git\x00evil"], policy)
 
 
 @pytest.mark.parametrize(
@@ -92,169 +66,110 @@ def test_null_character_is_rejected(policy):
         ["/usr/bin/git", "status"],
         ["./git", "status"],
         ["../git", "status"],
-        ["bin/git", "status"],
-        [r"bin\git", "status"],
+        ["foo/bar", "status"],
+        [r"foo\bar", "status"],
     ],
 )
-def test_path_qualified_executable_is_rejected(policy, command):
-    result = validate_command_allowlist(command, policy)
+def test_path_qualified_executable_is_rejected(command):
+    policy = CommandAllowlistPolicy({"git", "foo/bar"})
 
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_PATH_NOT_ALLOWED"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist(command, policy)
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        ["git;rm", "-rf"],
-        ["git|cat"],
-        ["git&&cat"],
-        ["git>output"],
-        ["git`id`"],
+        ["git;rm"],
+        ["git|rm"],
+        ["git&&rm"],
         ["git$(id)"],
-        ["git\nstatus"],
-        ["git\rstatus"],
+        ["git`id`"],
+        ["git>file"],
+        ["git\nrm"],
     ],
 )
-def test_shell_syntax_in_executable_is_rejected(policy, command):
-    result = validate_command_allowlist(command, policy)
+def test_shell_metacharacters_are_rejected(command):
+    policy = CommandAllowlistPolicy({"git"})
 
-    assert result.allowed is False
-
-
-def test_executable_leading_whitespace_is_rejected(policy):
-    result = validate_command_allowlist([" git"], policy)
-
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_WHITESPACE_NOT_ALLOWED"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist(command, policy)
 
 
-def test_executable_trailing_whitespace_is_rejected(policy):
-    result = validate_command_allowlist(["git "], policy)
+@pytest.mark.parametrize("command", [["."], [".."]])
+def test_dot_executable_is_rejected(command):
+    policy = CommandAllowlistPolicy({".", ".."})
 
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_WHITESPACE_NOT_ALLOWED"
-
-
-def test_dot_executable_is_rejected(policy):
-    result = validate_command_allowlist(["."], policy)
-
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_PATH_NOT_ALLOWED"
+    with pytest.raises(CommandAllowlistError):
+        validate_command_allowlist(command, policy)
 
 
-def test_dotdot_executable_is_rejected(policy):
-    result = validate_command_allowlist([".."], policy)
+def test_arguments_are_not_part_of_allowlist_decision():
+    policy = CommandAllowlistPolicy({"git"})
 
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_PATH_NOT_ALLOWED"
-
-
-def test_arguments_do_not_change_executable_allowlist(policy):
     result = validate_command_allowlist(
         ["git", "status", "--porcelain"],
         policy,
     )
 
     assert result.allowed is True
-    assert result.executable == "git"
 
 
-def test_argument_shell_text_belongs_to_task_189(policy):
-    result = validate_command_allowlist(
-        ["git", "status; echo forbidden"],
-        policy,
-    )
+def test_default_deny():
+    policy = CommandAllowlistPolicy(set())
 
-    assert result.allowed is True
-    assert result.executable == "git"
-
-
-def test_default_deny(policy):
-    result = validate_command_allowlist(
-        ["unknown-command"],
-        policy,
-    )
+    result = validate_command_allowlist(["git", "status"], policy)
 
     assert result.allowed is False
-
-
-def test_empty_policy_denies_everything():
-    policy = CommandAllowlistPolicy.from_iterable(set())
-
-    result = validate_command_allowlist(["git"], policy)
-
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
-
-
-def test_policy_rejects_string():
-    with pytest.raises(TypeError):
-        CommandAllowlistPolicy.from_iterable("git")
-
-
-def test_policy_rejects_bytes():
-    with pytest.raises(TypeError):
-        CommandAllowlistPolicy.from_iterable(b"git")
-
-
-def test_policy_rejects_empty_entry():
-    with pytest.raises(CommandAllowlistError):
-        CommandAllowlistPolicy.from_iterable({"git", ""})
-
-
-def test_policy_rejects_path_entry():
-    with pytest.raises(CommandAllowlistError):
-        CommandAllowlistPolicy.from_iterable({"/usr/bin/git"})
-
-
-def test_policy_rejects_shell_syntax():
-    with pytest.raises(CommandAllowlistError):
-        CommandAllowlistPolicy.from_iterable({"git;rm"})
-
-
-def test_require_allowed_command_passes(policy):
-    result = require_allowed_command(["git", "status"], policy)
-
-    assert result.allowed is True
-    assert result.executable == "git"
-
-
-def test_require_allowed_command_fails_closed(policy):
-    with pytest.raises(CommandAllowlistError):
-        require_allowed_command(["curl"], policy)
-
-
-def test_result_to_dict(policy):
-    result = validate_command_allowlist(["git"], policy)
-
-    assert result.to_dict() == {
-        "allowed": True,
-        "executable": "git",
-        "reason": "EXECUTABLE_ALLOWLISTED",
-        "command_length": 1,
-    }
+    assert result.reason == "EXECUTABLE_NOT_ALLOWED"
 
 
 def test_allowlist_is_immutable():
-    policy = CommandAllowlistPolicy.from_iterable({"git"})
+    policy = CommandAllowlistPolicy({"git"})
+
+    assert isinstance(policy.allowed_executables, frozenset)
 
     with pytest.raises(AttributeError):
-        policy.allowed_commands.add("curl")
+        policy.allowed_executables.add("python")
 
 
-def test_allowlist_matching_is_case_sensitive(policy):
-    result = validate_command_allowlist(["Git"], policy)
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        " git",
+        "git ",
+        "foo/bar",
+        "foo\\bar",
+        "git;rm",
+        "git\x00evil",
+        ".",
+        "..",
+    ],
+)
+def test_invalid_policy_entry_is_rejected(value):
+    with pytest.raises(CommandAllowlistError):
+        CommandAllowlistPolicy({value})
+
+
+def test_allowlist_is_case_sensitive():
+    policy = CommandAllowlistPolicy({"git"})
+
+    result = validate_command_allowlist(["GIT"], policy)
 
     assert result.allowed is False
-    assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
 
 
-def test_validation_does_not_execute_command(policy):
-    result = validate_command_allowlist(
-        ["python3", "-c", "raise SystemExit(99)"],
-        policy,
-    )
+def test_require_allowed_command_returns_result():
+    policy = CommandAllowlistPolicy({"git"})
+
+    result = require_allowed_command(["git", "status"], policy)
 
     assert result.allowed is True
-    assert result.executable == "python3"
+
+
+def test_require_allowed_command_rejects():
+    policy = CommandAllowlistPolicy({"git"})
+
+    with pytest.raises(CommandAllowlistError):
+        require_allowed_command(["rm", "-rf", "/"], policy)

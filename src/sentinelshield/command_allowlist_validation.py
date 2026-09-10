@@ -1,84 +1,71 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 
 class CommandAllowlistError(ValueError):
-    """Raised when a command allowlist policy is invalid."""
-
-
-_SHELL_META_RE = re.compile(r"[;&|`$><\n\r]")
+    """Raised when command allowlist input is invalid."""
 
 
 @dataclass(frozen=True)
 class CommandAllowlistPolicy:
-    """
-    Immutable executable allowlist.
+    allowed_executables: frozenset[str]
 
-    Only executable basenames are permitted.
-    Path-qualified executables are rejected.
-
-    Argument validation is intentionally handled by Task 189.
-    """
-
-    allowed_commands: frozenset[str]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.allowed_commands, frozenset):
-            raise TypeError("allowed_commands must be frozenset")
-
-        for command in self.allowed_commands:
-            if not isinstance(command, str):
-                raise TypeError("allowlist entries must be strings")
-
-            if not command:
-                raise CommandAllowlistError(
-                    "allowlist cannot contain an empty command"
-                )
-
-            if command != command.strip():
-                raise CommandAllowlistError(
-                    f"allowlist entry contains surrounding whitespace: {command!r}"
-                )
-
-            if command in {".", ".."}:
-                raise CommandAllowlistError(
-                    f"invalid allowlist executable: {command!r}"
-                )
-
-            if "/" in command or "\\" in command:
-                raise CommandAllowlistError(
-                    f"path-qualified executable is forbidden: {command!r}"
-                )
-
-            if "\x00" in command:
-                raise CommandAllowlistError(
-                    "NULL character in allowlist entry"
-                )
-
-            if _SHELL_META_RE.search(command):
-                raise CommandAllowlistError(
-                    f"shell metacharacter in allowlist entry: {command!r}"
-                )
-
-    @classmethod
-    def from_iterable(
-        cls,
-        commands: Iterable[str],
-    ) -> "CommandAllowlistPolicy":
-        if isinstance(commands, (str, bytes)):
-            raise TypeError(
-                "commands must be an iterable of executable names"
+    def __init__(self, allowed_executables: Iterable[str]) -> None:
+        if isinstance(allowed_executables, (str, bytes)):
+            raise CommandAllowlistError(
+                "allowed_executables must be an iterable of strings"
             )
 
         try:
-            values = frozenset(commands)
-        except TypeError as exc:
-            raise TypeError("commands must be iterable") from exc
+            values = tuple(allowed_executables)
+        except TypeError as error:
+            raise CommandAllowlistError(
+                "allowed_executables must be iterable"
+            ) from error
 
-        return cls(allowed_commands=values)
+        for executable in values:
+            if not isinstance(executable, str):
+                raise CommandAllowlistError(
+                    "allowlist entries must be strings"
+                )
+
+            if not executable:
+                raise CommandAllowlistError(
+                    "allowlist entries must not be empty"
+                )
+
+            if executable != executable.strip():
+                raise CommandAllowlistError(
+                    "allowlist entries must not contain surrounding whitespace"
+                )
+
+            if "\x00" in executable:
+                raise CommandAllowlistError(
+                    "allowlist entries must not contain NULL characters"
+                )
+
+            if "/" in executable or "\\" in executable:
+                raise CommandAllowlistError(
+                    "allowlist entries must contain executable names only"
+                )
+
+            if executable in {".", ".."}:
+                raise CommandAllowlistError(
+                    "invalid executable name"
+                )
+
+            if any(char in executable for char in ";|&><`$(){}[]*?!\n\r"):
+                raise CommandAllowlistError(
+                    "allowlist entry contains shell metacharacters"
+                )
+
+        object.__setattr__(
+            self,
+            "allowed_executables",
+            frozenset(values),
+        )
 
 
 @dataclass(frozen=True)
@@ -86,130 +73,99 @@ class CommandAllowlistResult:
     allowed: bool
     executable: str | None
     reason: str
-    command_length: int
-
-    def to_dict(self) -> dict:
-        return {
-            "allowed": self.allowed,
-            "executable": self.executable,
-            "reason": self.reason,
-            "command_length": self.command_length,
-        }
 
 
-def _validate_command_shape(
-    command: object,
-) -> tuple[bool, str, int]:
+def _validate_command_shape(command: Sequence[str]) -> None:
     if isinstance(command, (str, bytes)):
-        return False, "COMMAND_MUST_BE_SEQUENCE", 0
+        raise CommandAllowlistError(
+            "command must be a sequence of strings, not a string"
+        )
 
-    if not isinstance(command, Sequence):
-        return False, "COMMAND_MUST_BE_SEQUENCE", 0
+    try:
+        values = tuple(command)
+    except TypeError as error:
+        raise CommandAllowlistError(
+            "command must be a sequence"
+        ) from error
 
-    length = len(command)
+    if not values:
+        raise CommandAllowlistError(
+            "command must not be empty"
+        )
 
-    if length == 0:
-        return False, "COMMAND_IS_EMPTY", 0
-
-    for item in command:
+    for item in values:
         if not isinstance(item, str):
-            return False, "COMMAND_ELEMENT_MUST_BE_STRING", length
-
-        if item == "":
-            return False, "COMMAND_ELEMENT_IS_EMPTY", length
+            raise CommandAllowlistError(
+                "command arguments must be strings"
+            )
 
         if "\x00" in item:
-            return False, "NULL_CHARACTER_NOT_ALLOWED", length
+            raise CommandAllowlistError(
+                "command must not contain NULL characters"
+            )
 
-    return True, "OK", length
 
-
-def _validate_executable_name(executable: str) -> str | None:
+def _validate_executable_name(executable: str) -> None:
     if not executable:
-        return "EXECUTABLE_IS_EMPTY"
+        raise CommandAllowlistError(
+            "executable must not be empty"
+        )
 
     if executable != executable.strip():
-        return "EXECUTABLE_WHITESPACE_NOT_ALLOWED"
-
-    if executable in {".", ".."}:
-        return "EXECUTABLE_PATH_NOT_ALLOWED"
+        raise CommandAllowlistError(
+            "executable must not contain surrounding whitespace"
+        )
 
     if "/" in executable or "\\" in executable:
-        return "EXECUTABLE_PATH_NOT_ALLOWED"
+        raise CommandAllowlistError(
+            "path-qualified executables are not allowed"
+        )
 
-    if "\x00" in executable:
-        return "NULL_CHARACTER_NOT_ALLOWED"
+    if executable in {".", ".."}:
+        raise CommandAllowlistError(
+            "dot executable names are not allowed"
+        )
 
-    if _SHELL_META_RE.search(executable):
-        return "EXECUTABLE_SHELL_SYNTAX_NOT_ALLOWED"
-
-    return None
+    if any(char in executable for char in ";|&><`$(){}[]*?!\n\r"):
+        raise CommandAllowlistError(
+            "executable contains shell metacharacters"
+        )
 
 
 def validate_command_allowlist(
-    command: object,
+    command: Sequence[str],
     policy: CommandAllowlistPolicy,
 ) -> CommandAllowlistResult:
-    """
-    Validate only the executable component against an explicit allowlist.
-
-    This function:
-    - does not execute commands;
-    - does not invoke a shell;
-    - does not resolve executables;
-    - does not modify the filesystem;
-    - fails closed for unknown executables.
-    """
     if not isinstance(policy, CommandAllowlistPolicy):
-        raise TypeError("policy must be CommandAllowlistPolicy")
-
-    valid, reason, length = _validate_command_shape(command)
-
-    if not valid:
-        return CommandAllowlistResult(
-            allowed=False,
-            executable=None,
-            reason=reason,
-            command_length=length,
+        raise CommandAllowlistError(
+            "policy must be CommandAllowlistPolicy"
         )
 
-    executable = command[0]
+    _validate_command_shape(command)
 
-    executable_error = _validate_executable_name(executable)
+    values = tuple(command)
+    executable = values[0]
 
-    if executable_error is not None:
+    _validate_executable_name(executable)
+
+    if executable not in policy.allowed_executables:
         return CommandAllowlistResult(
             allowed=False,
             executable=executable,
-            reason=executable_error,
-            command_length=length,
-        )
-
-    if executable not in policy.allowed_commands:
-        return CommandAllowlistResult(
-            allowed=False,
-            executable=executable,
-            reason="EXECUTABLE_NOT_ALLOWLISTED",
-            command_length=length,
+            reason="EXECUTABLE_NOT_ALLOWED",
         )
 
     return CommandAllowlistResult(
         allowed=True,
         executable=executable,
-        reason="EXECUTABLE_ALLOWLISTED",
-        command_length=length,
+        reason="COMMAND_ALLOWED",
     )
 
 
 def require_allowed_command(
-    command: object,
+    command: Sequence[str],
     policy: CommandAllowlistPolicy,
 ) -> CommandAllowlistResult:
-    """
-    Fail closed if the executable is not explicitly allowlisted.
-
-    No command is executed.
-    """
     result = validate_command_allowlist(command, policy)
 
     if not result.allowed:
