@@ -1,0 +1,112 @@
+name: TASK 206 - Dependency Version Verification
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/sentinelshield/dependency_version_verification.py"
+      - "tests/test_dependency_version_verification.py"
+      - ".github/workflows/task-206-dependency-version-verification.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  task-206:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Verify module import
+        run: |
+          python -c "import sentinelshield.dependency_version_verification"
+
+      - name: Run TASK 206 tests
+        run: |
+          python -m pytest -q tests/test_dependency_version_verification.py
+
+      - name: Run isolated live validation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tempfile
+
+          from sentinelshield.dependency_version_verification import (
+              DependencyVersionVerificationRequest,
+              ExpectedDependencyVersion,
+              ResolvedDependencyVersion,
+              verify_dependency_versions,
+          )
+
+          with tempfile.TemporaryDirectory() as temporary:
+              root = Path(temporary) / "fixture"
+              root.mkdir()
+              (root / ".git").mkdir()
+
+              request = DependencyVersionVerificationRequest(
+                  repository_root=root,
+                  package_manager="pip",
+                  resolved_dependencies=(
+                      ResolvedDependencyVersion(
+                          "requests",
+                          "2.32.0",
+                      ),
+                      ResolvedDependencyVersion(
+                          "urllib3",
+                          "2.2.2",
+                      ),
+                  ),
+                  expected_dependencies=(
+                      ExpectedDependencyVersion(
+                          "requests",
+                          "2.32.0",
+                      ),
+                      ExpectedDependencyVersion(
+                          "urllib3",
+                          "2.2.2",
+                      ),
+                  ),
+              )
+
+              result = verify_dependency_versions(request)
+
+              assert result.valid is True
+              assert result.reason == "DEPENDENCY_VERSIONS_VERIFIED"
+              assert result.missing == ()
+              assert result.mismatches == ()
+              assert result.unexpected == ()
+              assert result.duplicates == ()
+
+              print("TASK 206 LIVE VALIDATION: PASS")
+          PY
+
+      - name: Verify repository diff formatting
+        run: |
+          git diff --check
+
+      - name: Verify no changed bytecode
+        run: |
+          if git status --porcelain | grep -E '(^|/)(__pycache__/|.*\.pyc$)'; then
+            echo "TASK 206 FAIL: bytecode changes detected"
+            exit 1
+          fi
+
+      - name: TASK 206 PASS
+        run: |
+          echo "TASK 206 PASS: dependency version verification completed on GitHub runner"
