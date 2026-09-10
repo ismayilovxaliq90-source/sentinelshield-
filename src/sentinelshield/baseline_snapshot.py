@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from hashlib import sha256
+import json
 from pathlib import Path
 import subprocess
 from typing import Optional
@@ -10,7 +11,7 @@ from typing import Optional
 @dataclass(frozen=True)
 class BaselineFile:
     path: str
-    kind: str
+    status: str
     fingerprint: str
 
 
@@ -19,11 +20,29 @@ class BaselineSnapshot:
     repository_root: Path
     head: str
     branch: Optional[str]
-    detached_head: bool
-    status: tuple[str, ...]
     files: tuple[BaselineFile, ...]
     valid: bool
     reason: str
+
+    def to_dict(self) -> dict:
+        return {
+            "repository_root": str(self.repository_root),
+            "head": self.head,
+            "branch": self.branch,
+            "files": [
+                asdict(item)
+                for item in self.files
+            ],
+            "valid": self.valid,
+            "reason": self.reason,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(
+            self.to_dict(),
+            indent=2,
+            sort_keys=True,
+        )
 
 
 def _run_git(
@@ -62,37 +81,51 @@ def _find_repository_root(
     return Path(value).resolve()
 
 
-def _git_value(
+def _get_head(
     repository_root: Path,
-    arguments: list[str],
     timeout: float,
 ) -> str:
     result = _run_git(
         repository_root,
-        arguments,
+        ["rev-parse", "HEAD"],
         timeout,
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            result.stderr.strip()
-            or "Git command failed"
+            f"Unable to determine HEAD: "
+            f"{result.stderr.strip()}"
         )
 
-    value = result.stdout.strip()
+    head = result.stdout.strip()
 
-    if not value:
-        raise RuntimeError(
-            f"Git returned empty output for: {arguments!r}"
-        )
+    if not head:
+        raise RuntimeError("Repository HEAD is empty")
 
-    return value
+    return head
 
 
-def _git_status(
+def _get_branch(
     repository_root: Path,
     timeout: float,
-) -> tuple[str, ...]:
+) -> Optional[str]:
+    result = _run_git(
+        repository_root,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        timeout,
+    )
+
+    if result.returncode == 0:
+        branch = result.stdout.strip()
+        return branch or None
+
+    return None
+
+
+def _get_status(
+    repository_root: Path,
+    timeout: float,
+) -> tuple[tuple[str, str], ...]:
     result = _run_git(
         repository_root,
         [
@@ -106,109 +139,30 @@ def _git_status(
 
     if result.returncode != 0:
         raise RuntimeError(
-            result.stderr.strip()
-            or "git status failed"
+            f"Unable to determine repository status: "
+            f"{result.stderr.strip()}"
         )
 
-    return tuple(
-        line
-        for line in result.stdout.splitlines()
-        if line
-    )
+    entries: list[tuple[str, str]] = []
 
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
 
-def _hash_file(path: Path) -> str:
-    digest = sha256()
-
-    with path.open("rb") as handle:
-        for chunk in iter(
-            lambda: handle.read(1024 * 1024),
-            b"",
-        ):
-            digest.update(chunk)
-
-    return digest.hexdigest()
-
-
-def _fingerprint_path(
-    repository_root: Path,
-    relative_path: str,
-) -> tuple[str, str]:
-    path = repository_root / relative_path
-
-    if path.is_symlink():
-        target = path.readlink().as_posix()
-
-        return (
-            "symlink",
-            sha256(
-                target.encode("utf-8")
-            ).hexdigest(),
-        )
-
-    if path.is_file():
-        return (
-            "file",
-            _hash_file(path),
-        )
-
-    if path.is_dir():
-        digest = sha256()
-
-        entries = sorted(
-            child
-            for child in path.rglob("*")
-            if child.is_file() or child.is_symlink()
-        )
-
-        for child in entries:
-            child_relative = (
-                child.relative_to(repository_root)
-                .as_posix()
+        if len(line) < 3:
+            raise RuntimeError(
+                f"Invalid git status line: {line!r}"
             )
 
-            if child.is_symlink():
-                child_value = (
-                    "symlink:"
-                    + child.readlink().as_posix()
-                )
-            else:
-                child_value = (
-                    "file:"
-                    + _hash_file(child)
-                )
+        status = line[:2]
+        path = line[3:]
 
-            digest.update(
-                child_relative.encode("utf-8")
-            )
-            digest.update(b"\0")
-            digest.update(
-                child_value.encode("utf-8")
-            )
-            digest.update(b"\0")
+        entries.append((status, path))
 
-        return (
-            "directory",
-            digest.hexdigest(),
-        )
-
-    metadata = path.stat()
-
-    value = (
-        f"{metadata.st_mode}:"
-        f"{metadata.st_size}:"
-        f"{metadata.st_mtime_ns}"
-    )
-
-    return (
-        "other",
-        sha256(
-            value.encode("utf-8")
-        ).hexdigest(),
-    )
+    return tuple(entries)
 
 
-def _tracked_and_untracked_paths(
+def _tracked_files(
     repository_root: Path,
     timeout: float,
 ) -> tuple[str, ...]:
@@ -216,9 +170,6 @@ def _tracked_and_untracked_paths(
         repository_root,
         [
             "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
             "-z",
         ],
         timeout,
@@ -226,19 +177,114 @@ def _tracked_and_untracked_paths(
 
     if result.returncode != 0:
         raise RuntimeError(
-            result.stderr.strip()
-            or "git ls-files failed"
+            f"Unable to enumerate tracked files: "
+            f"{result.stderr.strip()}"
         )
 
-    raw = result.stdout
+    return tuple(
+        value
+        for value in result.stdout.split("\0")
+        if value
+    )
 
-    paths = [
-        item
-        for item in raw.split("\0")
-        if item
-    ]
 
-    return tuple(sorted(set(paths)))
+def _status_map(
+    statuses: tuple[tuple[str, str], ...],
+) -> dict[str, str]:
+    return {
+        path: status
+        for status, path in statuses
+    }
+
+
+def _fingerprint_path(
+    repository_root: Path,
+    relative_path: str,
+) -> str:
+    path = repository_root / relative_path
+
+    if not path.exists() and not path.is_symlink():
+        return "MISSING"
+
+    if path.is_symlink():
+        target = path.readlink().as_posix()
+
+        return (
+            "SYMLINK:"
+            + sha256(
+                target.encode("utf-8")
+            ).hexdigest()
+        )
+
+    if path.is_file():
+        digest = sha256()
+
+        with path.open("rb") as handle:
+            for chunk in iter(
+                lambda: handle.read(1024 * 1024),
+                b"",
+            ):
+                digest.update(chunk)
+
+        return "FILE:" + digest.hexdigest()
+
+    if path.is_dir():
+        digest = sha256()
+
+        children = sorted(
+            child
+            for child in path.rglob("*")
+            if child.is_file() or child.is_symlink()
+        )
+
+        for child in children:
+            relative = child.relative_to(
+                repository_root
+            ).as_posix()
+
+            if child.is_symlink():
+                child_value = (
+                    "SYMLINK:"
+                    + child.readlink().as_posix()
+                )
+            else:
+                child_digest = sha256()
+
+                with child.open("rb") as handle:
+                    for chunk in iter(
+                        lambda: handle.read(1024 * 1024),
+                        b"",
+                    ):
+                        child_digest.update(chunk)
+
+                child_value = (
+                    "FILE:"
+                    + child_digest.hexdigest()
+                )
+
+            digest.update(
+                relative.encode("utf-8")
+            )
+            digest.update(b"\0")
+            digest.update(child_value.encode("utf-8"))
+            digest.update(b"\0")
+
+        return "DIR:" + digest.hexdigest()
+
+    try:
+        stat = path.stat()
+
+        metadata = (
+            f"{stat.st_mode}:"
+            f"{stat.st_size}:"
+            f"{stat.st_mtime_ns}"
+        )
+    except OSError as error:
+        metadata = f"STAT_ERROR:{error}"
+
+    return "OTHER:" + sha256(
+        metadata.encode("utf-8")
+    ).hexdigest()
 
 
 def create_baseline_snapshot(
@@ -256,8 +302,6 @@ def create_baseline_snapshot(
             repository_root=Path(".").resolve(),
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason=f"INVALID_START_PATH: {error}",
@@ -268,8 +312,6 @@ def create_baseline_snapshot(
             repository_root=start,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason="START_PATH_NOT_FOUND",
@@ -280,15 +322,13 @@ def create_baseline_snapshot(
             repository_root=start,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason="START_PATH_NOT_DIRECTORY",
         )
 
     try:
-        root = _find_repository_root(
+        repository_root = _find_repository_root(
             start,
             timeout,
         )
@@ -297,8 +337,6 @@ def create_baseline_snapshot(
             repository_root=start,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason="GIT_ROOT_TIMEOUT",
@@ -308,120 +346,101 @@ def create_baseline_snapshot(
             repository_root=start,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason=f"GIT_ROOT_ERROR: {error}",
         )
 
-    if root is None:
+    if repository_root is None:
         return BaselineSnapshot(
             repository_root=start,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason="NOT_A_GIT_REPOSITORY",
         )
 
     try:
-        head = _git_value(
-            root,
-            ["rev-parse", "HEAD"],
+        head = _get_head(
+            repository_root,
             timeout,
         )
 
-        branch_result = _run_git(
-            root,
-            [
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "HEAD",
-            ],
+        branch = _get_branch(
+            repository_root,
             timeout,
         )
 
-        if branch_result.returncode == 0:
-            branch = branch_result.stdout.strip()
-            detached_head = False
-        else:
-            branch = None
-            detached_head = True
-
-        status = _git_status(
-            root,
+        statuses = _get_status(
+            repository_root,
             timeout,
         )
 
-        paths = _tracked_and_untracked_paths(
-            root,
+        tracked = _tracked_files(
+            repository_root,
             timeout,
         )
 
-        files: list[BaselineFile] = []
+        status_by_path = _status_map(statuses)
 
-        for relative_path in paths:
-            kind, fingerprint = _fingerprint_path(
-                root,
-                relative_path,
+        paths = set(tracked)
+
+        for _, path in statuses:
+            paths.add(path)
+
+        baseline_files: list[BaselineFile] = []
+
+        for path in sorted(paths):
+            status = status_by_path.get(
+                path,
+                "  ",
             )
 
-            files.append(
+            fingerprint = _fingerprint_path(
+                repository_root,
+                path,
+            )
+
+            baseline_files.append(
                 BaselineFile(
-                    path=relative_path,
-                    kind=kind,
+                    path=path,
+                    status=status,
                     fingerprint=fingerprint,
                 )
             )
 
     except subprocess.TimeoutExpired:
         return BaselineSnapshot(
-            repository_root=root,
+            repository_root=repository_root,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason="BASELINE_GIT_TIMEOUT",
         )
     except (OSError, RuntimeError) as error:
         return BaselineSnapshot(
-            repository_root=root,
+            repository_root=repository_root,
             head="",
             branch=None,
-            detached_head=False,
-            status=(),
             files=(),
             valid=False,
             reason=f"BASELINE_CREATION_ERROR: {error}",
         )
 
     return BaselineSnapshot(
-        repository_root=root,
+        repository_root=repository_root,
         head=head,
         branch=branch,
-        detached_head=detached_head,
-        status=status,
-        files=tuple(files),
+        files=tuple(baseline_files),
         valid=True,
         reason="BASELINE_SNAPSHOT_CREATED",
     )
-
-
-def baseline_has_changes(
-    snapshot: BaselineSnapshot,
-) -> bool:
-    return bool(snapshot.status)
 
 
 __all__ = [
     "BaselineFile",
     "BaselineSnapshot",
     "create_baseline_snapshot",
-    "baseline_has_changes",
 ]

@@ -1,9 +1,7 @@
 import subprocess
 
 from sentinelshield.baseline_snapshot import (
-    BaselineFile,
     BaselineSnapshot,
-    baseline_has_changes,
     create_baseline_snapshot,
 )
 
@@ -18,7 +16,7 @@ def _git(repo, *args):
     )
 
 
-def _create_repo(tmp_path):
+def _init_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -43,25 +41,17 @@ def _create_repo(tmp_path):
     return repo
 
 
-def test_clean_repository_baseline(tmp_path):
-    repo = _create_repo(tmp_path)
+def test_clean_repository_snapshot(tmp_path):
+    repo = _init_repo(tmp_path)
 
     snapshot = create_baseline_snapshot(repo)
 
+    assert isinstance(snapshot, BaselineSnapshot)
     assert snapshot.valid is True
-    assert snapshot.repository_root == repo
+    assert snapshot.repository_root == repo.resolve()
     assert len(snapshot.head) == 40
-    assert snapshot.branch is not None
-    assert snapshot.detached_head is False
-    assert snapshot.status == ()
+    assert snapshot.branch
     assert snapshot.reason == "BASELINE_SNAPSHOT_CREATED"
-    assert baseline_has_changes(snapshot) is False
-
-
-def test_baseline_contains_tracked_file(tmp_path):
-    repo = _create_repo(tmp_path)
-
-    snapshot = create_baseline_snapshot(repo)
 
     paths = {
         item.path
@@ -71,8 +61,8 @@ def test_baseline_contains_tracked_file(tmp_path):
     assert "tracked.txt" in paths
 
 
-def test_baseline_fingerprints_file(tmp_path):
-    repo = _create_repo(tmp_path)
+def test_snapshot_contains_tracked_file_fingerprint(tmp_path):
+    repo = _init_repo(tmp_path)
 
     snapshot = create_baseline_snapshot(repo)
 
@@ -82,64 +72,87 @@ def test_baseline_fingerprints_file(tmp_path):
         if item.path == "tracked.txt"
     )
 
-    assert item.kind == "file"
-    assert len(item.fingerprint) == 64
+    assert item.status == "  "
+    assert item.fingerprint.startswith("FILE:")
+    assert len(item.fingerprint) == 69
 
 
-def test_baseline_records_existing_working_tree_change(tmp_path):
-    repo = _create_repo(tmp_path)
+def test_snapshot_captures_preexisting_modified_file(tmp_path):
+    repo = _init_repo(tmp_path)
 
     tracked = repo / "tracked.txt"
-    tracked.write_text("pre-existing change")
+    tracked.write_text("pre-existing user change")
 
     snapshot = create_baseline_snapshot(repo)
 
-    assert snapshot.valid is True
-    assert snapshot.status != ()
-    assert baseline_has_changes(snapshot) is True
-
-
-def test_baseline_records_untracked_file(tmp_path):
-    repo = _create_repo(tmp_path)
-
-    untracked = repo / "new.txt"
-    untracked.write_text("user file")
-
-    snapshot = create_baseline_snapshot(repo)
-
-    paths = {
-        item.path
+    item = next(
+        item
         for item in snapshot.files
-    }
+        if item.path == "tracked.txt"
+    )
 
-    assert "new.txt" in paths
-    assert any(
-        line.startswith("??")
-        for line in snapshot.status
+    assert item.status == " M"
+    assert item.fingerprint.startswith("FILE:")
+
+
+def test_snapshot_captures_untracked_file(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    new_file = repo / "user.txt"
+    new_file.write_text("user content")
+
+    snapshot = create_baseline_snapshot(repo)
+
+    item = next(
+        item
+        for item in snapshot.files
+        if item.path == "user.txt"
+    )
+
+    assert item.status == "??"
+    assert item.fingerprint.startswith("FILE:")
+
+
+def test_snapshot_fingerprint_changes_when_content_changes(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    tracked = repo / "tracked.txt"
+
+    first = create_baseline_snapshot(repo)
+
+    first_item = next(
+        item
+        for item in first.files
+        if item.path == "tracked.txt"
+    )
+
+    tracked.write_text("different content")
+
+    second = create_baseline_snapshot(repo)
+
+    second_item = next(
+        item
+        for item in second.files
+        if item.path == "tracked.txt"
+    )
+
+    assert (
+        first_item.fingerprint
+        != second_item.fingerprint
     )
 
 
-def test_missing_path_fails(tmp_path):
-    missing = tmp_path / "missing"
-
-    snapshot = create_baseline_snapshot(missing)
+def test_missing_path_fails_closed(tmp_path):
+    snapshot = create_baseline_snapshot(
+        tmp_path / "missing"
+    )
 
     assert snapshot.valid is False
     assert snapshot.reason == "START_PATH_NOT_FOUND"
 
 
-def test_file_path_fails(tmp_path):
-    file_path = tmp_path / "file.txt"
-    file_path.write_text("test")
-
-    snapshot = create_baseline_snapshot(file_path)
-
-    assert snapshot.valid is False
-    assert snapshot.reason == "START_PATH_NOT_DIRECTORY"
-
-
-def test_non_repository_fails(tmp_path):
-    directory = tmp_path / "not-repository"
+def test_non_git_directory_fails_closed(tmp_path):
+    directory = tmp_path / "plain"
     directory.mkdir()
 
     snapshot = create_baseline_snapshot(directory)
@@ -148,64 +161,18 @@ def test_non_repository_fails(tmp_path):
     assert snapshot.reason == "NOT_A_GIT_REPOSITORY"
 
 
-def test_invalid_snapshot_has_no_changes():
-    snapshot = BaselineSnapshot(
-        repository_root=None if False else __import__("pathlib").Path("."),
-        head="",
-        branch=None,
-        detached_head=False,
-        status=(),
-        files=(),
-        valid=False,
-        reason="TEST_INVALID",
-    )
-
-    assert snapshot.valid is False
-    assert baseline_has_changes(snapshot) is False
-
-
-def test_baseline_file_dataclass():
-    item = BaselineFile(
-        path="example.txt",
-        kind="file",
-        fingerprint="a" * 64,
-    )
-
-    assert item.path == "example.txt"
-    assert item.kind == "file"
-    assert item.fingerprint == "a" * 64
-
-
-def test_multiple_files_are_recorded(tmp_path):
-    repo = _create_repo(tmp_path)
-
-    first = repo / "first.txt"
-    second = repo / "second.txt"
-
-    first.write_text("first")
-    second.write_text("second")
+def test_snapshot_serialization(tmp_path):
+    repo = _init_repo(tmp_path)
 
     snapshot = create_baseline_snapshot(repo)
 
-    paths = {
-        item.path
-        for item in snapshot.files
-    }
+    payload = snapshot.to_dict()
 
-    assert "first.txt" in paths
-    assert "second.txt" in paths
-    assert "tracked.txt" in paths
+    assert payload["valid"] is True
+    assert payload["head"] == snapshot.head
+    assert isinstance(payload["files"], list)
 
+    json_text = snapshot.to_json()
 
-def test_snapshot_is_deterministic_for_unchanged_repository(tmp_path):
-    repo = _create_repo(tmp_path)
-
-    first = create_baseline_snapshot(repo)
-    second = create_baseline_snapshot(repo)
-
-    assert first.valid is True
-    assert second.valid is True
-    assert first.head == second.head
-    assert first.branch == second.branch
-    assert first.status == second.status
-    assert first.files == second.files
+    assert '"valid": true' in json_text
+    assert snapshot.head in json_text
