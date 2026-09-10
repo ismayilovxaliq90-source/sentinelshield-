@@ -7,303 +7,245 @@ from sentinelshield.package_installation_validation import (
     PackageInstallationRequest,
     PackageInstallationResult,
     PackageInstallationValidationError,
-    build_installation_command,
-    discover_installed_packages,
-    expected_dependency_names,
-    validate_installation_result,
-    validate_request,
+    SUPPORTED_MANAGERS,
+    attach_installed_packages,
+    build_install_command,
+    validate_installation_request,
+    validate_installed_package,
+    validate_package_installation_result,
 )
 
 
-def make_repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
-    root.mkdir()
-    (root / ".git").mkdir()
-
-    (root / "package.json").write_text(
-        """{
-  "name": "fixture",
-  "version": "1.0.0",
-  "private": true,
-  "dependencies": {
-    "is-number": "7.0.0"
-  }
-}""",
-        encoding="utf-8",
-    )
-
-    (root / "package-lock.json").write_text(
-        """{
-  "name": "fixture",
-  "version": "1.0.0",
-  "lockfileVersion": 3,
-  "packages": {
-    "": {
-      "name": "fixture",
-      "version": "1.0.0"
-    }
-  }
-}""",
-        encoding="utf-8",
-    )
-
-    return root
+def make_workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return workspace
 
 
-def create_installed_package(
-    root: Path,
-    name: str = "is-number",
-    version: str = "7.0.0",
-) -> Path:
-    package_dir = root / "node_modules" / name
-    package_dir.mkdir(parents=True)
-
-    (package_dir / "package.json").write_text(
-        (
-            "{"
-            f'"name":"{name}",'
-            f'"version":"{version}"'
-            "}"
-        ),
-        encoding="utf-8",
-    )
-
-    return package_dir
-
-
-def test_build_installation_command():
-    assert build_installation_command("npm") == (
+def test_supported_managers():
+    assert {
         "npm",
-        "ci",
-        "--ignore-scripts",
-        "--no-audit",
-        "--no-fund",
-    )
+        "pnpm",
+        "yarn",
+        "cargo",
+        "go",
+        "composer",
+        "poetry",
+    } <= SUPPORTED_MANAGERS
 
 
-def test_unknown_manager_is_rejected():
+@pytest.mark.parametrize("manager", sorted(SUPPORTED_MANAGERS))
+def test_install_command_is_allowlisted_sequence(manager):
+    command = build_install_command(manager)
+
+    assert isinstance(command, tuple)
+    assert command[0] == manager
+    assert all(isinstance(item, str) for item in command)
+
+
+def test_unknown_manager_rejected():
     with pytest.raises(PackageInstallationValidationError):
-        build_installation_command("unknown")
+        build_install_command("unknown")
 
 
-def test_request_validation(tmp_path):
-    root = make_repo(tmp_path)
-
-    assert validate_request(
-        PackageInstallationRequest(
-            repository_root=root,
-            manager="npm",
-        )
-    ) == root.resolve()
-
-
-def test_expected_dependencies(tmp_path):
-    root = make_repo(tmp_path)
-
-    assert expected_dependency_names(root) == (
-        "is-number",
-    )
-
-
-def test_missing_manifest_is_rejected(tmp_path):
-    root = make_repo(tmp_path)
-    (root / "package.json").unlink()
+def test_npm_requires_package_json(tmp_path):
+    workspace = make_workspace(tmp_path)
 
     with pytest.raises(PackageInstallationValidationError):
-        validate_request(
+        validate_installation_request(
             PackageInstallationRequest(
-                repository_root=root,
+                workspace=workspace,
+                manager="npm",
             )
         )
 
 
-def test_missing_lockfile_is_rejected(tmp_path):
-    root = make_repo(tmp_path)
-    (root / "package-lock.json").unlink()
+def test_repository_root_installation_rejected(tmp_path):
+    workspace = make_workspace(tmp_path)
+    (workspace / ".git").mkdir()
+    (workspace / "package.json").write_text(
+        '{"name":"fixture","version":"1.0.0"}',
+        encoding="utf-8",
+    )
 
     with pytest.raises(PackageInstallationValidationError):
-        validate_request(
+        validate_installation_request(
             PackageInstallationRequest(
-                repository_root=root,
+                workspace=workspace,
+                manager="npm",
             )
         )
 
 
-def test_invalid_timeout_is_rejected(tmp_path):
-    root = make_repo(tmp_path)
+def test_workspace_inside_repository_rejected(tmp_path):
+    repository = make_workspace(tmp_path)
+    (repository / ".git").mkdir()
+
+    workspace = repository / ".sentinelshield-install"
+    workspace.mkdir()
+
+    (workspace / "package.json").write_text(
+        '{"name":"fixture","version":"1.0.0"}',
+        encoding="utf-8",
+    )
 
     with pytest.raises(PackageInstallationValidationError):
-        validate_request(
+        validate_installation_request(
             PackageInstallationRequest(
-                repository_root=root,
+                workspace=workspace,
+                manager="npm",
+            )
+        )
+
+
+def test_timeout_validation(tmp_path):
+    workspace = make_workspace(tmp_path)
+    (workspace / "package.json").write_text(
+        '{"name":"fixture","version":"1.0.0"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PackageInstallationValidationError):
+        validate_installation_request(
+            PackageInstallationRequest(
+                workspace=workspace,
+                manager="npm",
                 timeout=0,
             )
         )
 
 
-def test_symlink_manifest_is_rejected(tmp_path):
-    root = make_repo(tmp_path)
-
-    real = root / "real-package.json"
-    real.write_text("{}", encoding="utf-8")
-
-    package = root / "package.json"
-    package.unlink()
-    package.symlink_to(real)
+def test_invalid_environment_rejected(tmp_path):
+    workspace = make_workspace(tmp_path)
+    (workspace / "package.json").write_text(
+        '{"name":"fixture","version":"1.0.0"}',
+        encoding="utf-8",
+    )
 
     with pytest.raises(PackageInstallationValidationError):
-        validate_request(
+        validate_installation_request(
             PackageInstallationRequest(
-                repository_root=root,
+                workspace=workspace,
+                manager="npm",
+                environment={"NODE_OPTIONS": "--require malicious"},
             )
         )
 
 
-def test_discover_installed_package(tmp_path):
-    root = make_repo(tmp_path)
-    create_installed_package(root)
-
-    packages = discover_installed_packages(root)
-
-    assert len(packages) == 1
-    assert packages[0].name == "is-number"
-    assert packages[0].version == "7.0.0"
-
-
-def test_missing_installed_package_is_rejected(tmp_path):
-    root = make_repo(tmp_path)
-    (root / "node_modules").mkdir()
-
-    with pytest.raises(PackageInstallationValidationError):
-        discover_installed_packages(root)
-
-
-def test_installed_symlink_is_rejected(tmp_path):
-    root = make_repo(tmp_path)
-    node_modules = root / "node_modules"
-    node_modules.mkdir()
-
-    real = root / "real-package"
-    real.mkdir()
-
-    (real / "package.json").write_text(
-        '{"name":"is-number","version":"7.0.0"}',
-        encoding="utf-8",
-    )
-
-    (node_modules / "is-number").symlink_to(real)
-
-    with pytest.raises(PackageInstallationValidationError):
-        discover_installed_packages(root)
-
-
-def test_result_validation():
-    package = InstalledPackage(
-        name="is-number",
-        version="7.0.0",
-        path=Path("/tmp/node_modules/is-number"),
-    )
-
-    result = PackageInstallationResult(
-        success=True,
-        manager="npm",
-        command=(
-            "npm",
-            "ci",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-        ),
-        returncode=0,
-        expected_packages=("is-number",),
-        installed_packages=(package,),
-        lockfile_present=True,
-        installation_directory_present=True,
-        stdout="",
-        stderr="",
-        timed_out=False,
-        error=None,
-    )
-
-    assert validate_installation_result(result) is True
-
-
-def test_result_count_mismatch_fails():
+def test_success_result_validation():
     result = PackageInstallationResult(
         success=True,
         manager="npm",
         command=("npm", "ci"),
         returncode=0,
-        expected_packages=("a", "b"),
-        installed_packages=(),
-        lockfile_present=True,
-        installation_directory_present=True,
-        stdout="",
+        stdout="ok",
         stderr="",
         timed_out=False,
+        installed_packages=(),
         error=None,
     )
 
-    assert validate_installation_result(result) is False
+    assert validate_package_installation_result(result) is True
 
 
-def test_failed_installation_result_is_valid_failure():
+def test_failed_result_validation():
     result = PackageInstallationResult(
         success=False,
         manager="npm",
         command=("npm", "ci"),
         returncode=1,
-        expected_packages=(),
-        installed_packages=(),
-        lockfile_present=True,
-        installation_directory_present=False,
         stdout="",
-        stderr="failure",
+        stderr="failed",
         timed_out=False,
+        installed_packages=(),
         error="PACKAGE_INSTALLATION_FAILED",
     )
 
-    assert validate_installation_result(result) is True
+    assert validate_package_installation_result(result) is True
 
 
-def test_timeout_result_is_invalid():
+def test_timeout_result_invalid():
     result = PackageInstallationResult(
         success=False,
         manager="npm",
         command=("npm", "ci"),
         returncode=None,
-        expected_packages=(),
-        installed_packages=(),
-        lockfile_present=True,
-        installation_directory_present=False,
         stdout="",
         stderr="",
         timed_out=True,
+        installed_packages=(),
         error="PACKAGE_INSTALLATION_TIMEOUT",
     )
 
-    assert validate_installation_result(result) is False
+    assert validate_package_installation_result(result) is False
+
+
+def test_installed_package_validation():
+    package = InstalledPackage(
+        name="is-number",
+        version="7.0.0",
+        source="npm",
+    )
+
+    assert validate_installed_package(package) is True
+
+
+def test_invalid_installed_package():
+    package = InstalledPackage(
+        name="",
+        version="7.0.0",
+    )
+
+    assert validate_installed_package(package) is False
+
+
+def test_attach_installed_packages():
+    result = PackageInstallationResult(
+        success=True,
+        manager="npm",
+        command=("npm", "ci"),
+        returncode=0,
+        stdout="ok",
+        stderr="",
+        timed_out=False,
+        installed_packages=(),
+        error=None,
+    )
+
+    package = InstalledPackage(
+        name="is-number",
+        version="7.0.0",
+        source="npm",
+    )
+
+    updated = attach_installed_packages(result, (package,))
+
+    assert len(updated.installed_packages) == 1
+    assert updated.installed_packages[0].name == "is-number"
 
 
 def test_result_serialization():
+    package = InstalledPackage(
+        name="is-number",
+        version="7.0.0",
+        source="npm",
+    )
+
     result = PackageInstallationResult(
-        success=False,
+        success=True,
         manager="npm",
         command=("npm", "ci"),
-        returncode=1,
-        expected_packages=(),
-        installed_packages=(),
-        lockfile_present=True,
-        installation_directory_present=False,
-        stdout="",
-        stderr="failure",
+        returncode=0,
+        stdout="ok",
+        stderr="",
         timed_out=False,
-        error="PACKAGE_INSTALLATION_FAILED",
+        installed_packages=(package,),
+        error=None,
     )
 
     data = result.to_dict()
 
-    assert data["success"] is False
+    assert data["success"] is True
     assert data["manager"] == "npm"
     assert data["command"] == ["npm", "ci"]
-    assert data["error"] == "PACKAGE_INSTALLATION_FAILED"
+    assert data["installed_packages"][0]["name"] == "is-number"

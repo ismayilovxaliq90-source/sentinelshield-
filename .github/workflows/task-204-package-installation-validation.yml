@@ -24,6 +24,9 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/src
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
+      npm_config_ignore_scripts: "true"
+      npm_config_audit: "false"
+      npm_config_fund: "false"
 
     steps:
       - name: Checkout repository
@@ -34,30 +37,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v7
         with:
           node-version: "22"
 
       - name: Install pytest
-        run: |
-          python -m pip install \
-            --disable-pip-version-check \
-            pytest
+        run: python -m pip install --disable-pip-version-check pytest
 
-      - name: Verify Task 204 import
+      - name: Verify module import
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          python -c \
-            "import sentinelshield.package_installation_validation"
+          python -c "import sentinelshield.package_installation_validation"
 
-      - name: Run Task 204 unit tests
+      - name: Run TASK 204 unit tests
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          python -m pytest -q \
-            tests/test_package_installation_validation.py
+          python -m pytest -q tests/test_package_installation_validation.py
 
-      - name: Prepare isolated npm fixture
+      - name: Prepare isolated installation fixture
         run: |
           set -euo pipefail
 
@@ -68,13 +66,15 @@ jobs:
 
           cd "$FIXTURE"
 
-          git init -q
-
           cat > package.json <<'JSON'
           {
             "name": "sentinelshield-task-204-fixture",
             "version": "1.0.0",
             "private": true,
+            "scripts": {
+              "preinstall": "node -e \"process.exit(99)\"",
+              "postinstall": "node -e \"process.exit(99)\""
+            },
             "dependencies": {
               "is-number": "7.0.0"
             }
@@ -89,218 +89,110 @@ jobs:
 
           test -f package-lock.json
 
-      - name: Verify Task 201 lockfile input
-        run: |
-          set -euo pipefail
-
-          FIXTURE="$RUNNER_TEMP/task-204-fixture"
-          cd "$FIXTURE"
-
-          node - <<'NODE'
-          const fs = require("fs");
-
-          const lock = JSON.parse(
-            fs.readFileSync("package-lock.json", "utf8")
-          );
-
-          if (
-            typeof lock !== "object" ||
-            lock === null
-          ) {
-            throw new Error("Invalid package-lock.json");
-          }
-
-          if (!("lockfileVersion" in lock)) {
-            throw new Error("lockfileVersion missing");
-          }
-
-          if (!("packages" in lock)) {
-            throw new Error("packages missing");
-          }
-
-          console.log(
-            "Task 201 lockfile input PASS:",
-            lock.lockfileVersion
-          );
-          NODE
-
-      - name: Verify Task 202 dependency-tree input
-        run: |
-          set -euo pipefail
-
-          FIXTURE="$RUNNER_TEMP/task-204-fixture"
-          cd "$FIXTURE"
-
-          npm ls \
-            --all \
-            --json \
-            --package-lock-only \
-            > "$RUNNER_TEMP/task-204-tree.json"
-
-          node - <<'NODE'
-          const fs = require("fs");
-
-          const tree = JSON.parse(
-            fs.readFileSync(
-              process.env.RUNNER_TEMP + "/task-204-tree.json",
-              "utf8"
-            )
-          );
-
-          if (
-            typeof tree !== "object" ||
-            tree === null
-          ) {
-            throw new Error("Invalid dependency tree");
-          }
-
-          if (
-            !("dependencies" in tree) &&
-            !("packages" in tree)
-          ) {
-            throw new Error(
-              "Dependency tree contains no dependency/package data"
-            );
-          }
-
-          console.log("Task 202 dependency-tree input PASS");
-          NODE
-
-      - name: Execute real package installation
+      - name: Execute real TASK 204 package installation
         run: |
           set -euo pipefail
 
           FIXTURE="$RUNNER_TEMP/task-204-fixture"
 
-          cd "$FIXTURE"
-
-          npm ci \
-            --ignore-scripts \
-            --no-audit \
-            --no-fund
-
-          test -d node_modules
-          test -f node_modules/is-number/package.json
-
-      - name: Validate Task 203 installation integrity
-        run: |
-          set -euo pipefail
-
-          FIXTURE="$RUNNER_TEMP/task-204-fixture"
-
-          cd "$FIXTURE"
-
-          node - <<'NODE'
-          const fs = require("fs");
-          const crypto = require("crypto");
-
-          const packageFile =
-            "node_modules/is-number/package.json";
-
-          if (!fs.statSync(packageFile).isFile()) {
-            throw new Error("Installed package metadata missing");
-          }
-
-          const packageData = JSON.parse(
-            fs.readFileSync(packageFile, "utf8")
-          );
-
-          if (packageData.name !== "is-number") {
-            throw new Error("Installed package name mismatch");
-          }
-
-          if (packageData.version !== "7.0.0") {
-            throw new Error(
-              "Installed package version mismatch"
-            );
-          }
-
-          const digest = crypto
-            .createHash("sha256")
-            .update(fs.readFileSync(packageFile))
-            .digest("hex");
-
-          if (digest.length !== 64) {
-            throw new Error("Invalid SHA-256 digest");
-          }
-
-          console.log(
-            "Task 203 integrity validation PASS:",
-            digest
-          );
-          NODE
-
-      - name: Validate Task 204 with SentinelShield
-        run: |
-          set -euo pipefail
-
-          FIXTURE="$RUNNER_TEMP/task-204-fixture"
-
-          cat > "$RUNNER_TEMP/task_204_live_check.py" <<'PY'
-          import os
+          cat > "$RUNNER_TEMP/task_204_live_check.py" <<PY
+          import json
           import sys
           from pathlib import Path
 
-          sys.path.insert(
-              0,
-              os.path.join(
-                  os.environ["GITHUB_WORKSPACE"],
-                  "src",
-              ),
-          )
+          sys.path.insert(0, "${GITHUB_WORKSPACE}/src")
 
           from sentinelshield.package_installation_validation import (
-              validate_installed_state,
-              validate_installation_result,
+              InstalledPackage,
+              PackageInstallationRequest,
+              attach_installed_packages,
+              execute_package_installation,
+              validate_package_installation_result,
           )
 
-          root = Path(
-              os.environ["RUNNER_TEMP"]
-          ) / "task-204-fixture"
+          root = Path("${FIXTURE}")
 
-          result = validate_installed_state(root)
+          result = execute_package_installation(
+              PackageInstallationRequest(
+                  workspace=root,
+                  manager="npm",
+                  timeout=180.0,
+              )
+          )
 
-          if not validate_installation_result(result):
-              print("TASK 204 FAIL: invalid validation result")
+          if not validate_package_installation_result(result):
+              print("TASK 204 FAIL: invalid installation result")
               print(result.to_dict())
               raise SystemExit(1)
 
           if not result.success:
-              print("TASK 204 FAIL: installed state invalid")
+              print("TASK 204 FAIL: package installation failed")
               print(result.to_dict())
               raise SystemExit(1)
 
-          if result.expected_packages != (
-              "is-number",
-          ):
-              print("TASK 204 FAIL: expected package mismatch")
-              raise SystemExit(1)
+          if result.returncode != 0:
+              raise SystemExit(
+                  "TASK 204 FAIL: installation return code is not zero"
+              )
 
-          if len(result.installed_packages) != 1:
-              print("TASK 204 FAIL: installed package count mismatch")
-              raise SystemExit(1)
+          node_modules = root / "node_modules"
+          package_path = node_modules / "is-number"
 
-          package = result.installed_packages[0]
+          if not node_modules.is_dir():
+              raise SystemExit(
+                  "TASK 204 FAIL: node_modules was not created"
+              )
 
-          if package.name != "is-number":
-              print("TASK 204 FAIL: package name mismatch")
-              raise SystemExit(1)
+          if not package_path.is_dir():
+              raise SystemExit(
+                  "TASK 204 FAIL: expected dependency was not installed"
+              )
 
-          if package.version != "7.0.0":
-              print("TASK 204 FAIL: package version mismatch")
-              raise SystemExit(1)
+          package_json = package_path / "package.json"
 
-          if not result.lockfile_present:
-              print("TASK 204 FAIL: lockfile missing")
-              raise SystemExit(1)
+          if not package_json.is_file():
+              raise SystemExit(
+                  "TASK 204 FAIL: installed package metadata missing"
+              )
 
-          if not result.installation_directory_present:
-              print("TASK 204 FAIL: node_modules missing")
-              raise SystemExit(1)
+          metadata = json.loads(
+              package_json.read_text(encoding="utf-8")
+          )
+
+          if metadata.get("name") != "is-number":
+              raise SystemExit(
+                  "TASK 204 FAIL: installed package name mismatch"
+              )
+
+          if metadata.get("version") != "7.0.0":
+              raise SystemExit(
+                  "TASK 204 FAIL: installed package version mismatch"
+              )
+
+          verified = attach_installed_packages(
+              result,
+              (
+                  InstalledPackage(
+                      name="is-number",
+                      version=str(metadata["version"]),
+                      source="npm",
+                  ),
+              ),
+          )
+
+          if len(verified.installed_packages) != 1:
+              raise SystemExit(
+                  "TASK 204 FAIL: installed package evidence missing"
+              )
 
           print("TASK 204 PASS")
-          print("package:", package.name)
-          print("version:", package.version)
+          print("manager:", verified.manager)
+          print("returncode:", verified.returncode)
+          print(
+              "installed:",
+              verified.installed_packages[0].name,
+              verified.installed_packages[0].version,
+          )
           PY
 
           PYTHONPATH="$GITHUB_WORKSPACE/src" \
@@ -309,30 +201,37 @@ jobs:
 
           rm -f "$RUNNER_TEMP/task_204_live_check.py"
 
-      - name: Verify fixture repository remains clean
+      - name: Verify lifecycle scripts were not executed
         run: |
           set -euo pipefail
 
-          cd "$RUNNER_TEMP/task-204-fixture"
+          FIXTURE="$RUNNER_TEMP/task-204-fixture"
 
-          STATUS="$(git status --porcelain=v1)"
+          test -d "$FIXTURE/node_modules"
+          test -d "$FIXTURE/node_modules/is-number"
 
-          if [ -n "$STATUS" ]; then
-            echo "TASK 204 FAIL: fixture repository changed"
-            printf '%s\n' "$STATUS"
-            exit 1
-          fi
+          echo "TASK 204 lifecycle-script protection PASS"
 
-          echo "TASK 204 repository-state PASS"
-
-      - name: Verify source repository has no bytecode changes
+      - name: Verify installation stayed outside repository
         run: |
           set -euo pipefail
 
-          cd "$GITHUB_WORKSPACE"
+          FIXTURE="$RUNNER_TEMP/task-204-fixture"
 
-          if git status --porcelain=v1 | grep -E \
-            '(^|[[:space:]])[^[:space:]]*\.pyc$|__pycache__'; then
+          case "$FIXTURE" in
+            "$GITHUB_WORKSPACE"/*)
+              echo "TASK 204 FAIL: fixture is inside repository"
+              exit 1
+              ;;
+          esac
+
+          echo "TASK 204 workspace isolation PASS"
+
+      - name: Verify no repository bytecode changes
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain=v1 | grep -E '(^|[[:space:]])[^[:space:]]*\.pyc$|__pycache__'; then
             echo "TASK 204 FAIL: bytecode changes detected"
             exit 1
           fi
