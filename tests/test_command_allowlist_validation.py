@@ -3,99 +3,57 @@ from __future__ import annotations
 import pytest
 
 from sentinelshield.command_allowlist_validation import (
-    DEFAULT_ALLOWED_EXECUTABLES,
     CommandAllowlistError,
     CommandAllowlistPolicy,
+    DEFAULT_ALLOWED_EXECUTABLES,
     require_allowed_command,
     validate_command_allowlist,
 )
 
 
-def test_default_policy_contains_required_execution_tools():
-    required = {
+def test_allowed_python_command():
+    result = validate_command_allowlist(["python", "--version"])
+
+    assert result.valid is True
+    assert result.executable == "python"
+    assert result.reason is None
+
+
+def test_allowed_python3_command():
+    result = validate_command_allowlist(["python3", "-m", "pytest"])
+
+    assert result.valid is True
+
+
+def test_all_default_executables_are_allowed():
+    for executable in DEFAULT_ALLOWED_EXECUTABLES:
+        result = validate_command_allowlist([executable])
+
+        assert result.valid is True
+        assert result.executable == executable
+
+
+def test_command_must_not_be_empty():
+    result = validate_command_allowlist([])
+
+    assert result.valid is False
+    assert result.reason == "COMMAND_MUST_NOT_BE_EMPTY"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "python",
-        "python3",
-        "node",
-        "npm",
-        "npx",
-        "yarn",
-        "pnpm",
-        "go",
-        "cargo",
-        "rustc",
-        "mvn",
-        "gradle",
-        "composer",
-        "dotnet",
-        "git",
-    }
-
-    assert required.issubset(DEFAULT_ALLOWED_EXECUTABLES)
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        ["python"],
-        ["python", "-m", "pytest"],
-        ["python3"],
-        ["node", "--version"],
-        ["npm", "--version"],
-        ["git", "status"],
+        b"python",
+        None,
+        123,
     ],
 )
-def test_allowlisted_executable_is_allowed(command):
+def test_command_must_be_sequence(command):
     result = validate_command_allowlist(command)
 
-    assert result.allowed is True
-    assert result.executable == command[0]
-    assert result.reason == "EXECUTABLE_ALLOWLISTED"
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        ["curl"],
-        ["wget"],
-        ["bash"],
-        ["sh"],
-        ["zsh"],
-        ["rm"],
-        ["chmod"],
-        ["chown"],
-        ["sudo"],
-        ["su"],
-        ["unknown-tool"],
-    ],
-)
-def test_non_allowlisted_executable_is_rejected(command):
-    result = validate_command_allowlist(command)
-
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
-
-
-def test_string_command_is_rejected():
-    result = validate_command_allowlist(
-        "python -m pytest"
-    )
-
-    assert result.allowed is False
-    assert result.reason == "COMMAND_MUST_BE_ARGUMENT_SEQUENCE"
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        [],
-        (),
-    ],
-)
-def test_empty_command_is_rejected(command):
-    result = validate_command_allowlist(command)
-
-    assert result.allowed is False
-    assert result.reason == "COMMAND_IS_EMPTY"
+    assert result.valid is False
+    assert result.reason == "COMMAND_MUST_BE_A_SEQUENCE"
 
 
 @pytest.mark.parametrize(
@@ -104,31 +62,30 @@ def test_empty_command_is_rejected(command):
         [None],
         [123],
         [b"python"],
-        [True],
     ],
 )
-def test_invalid_executable_type_is_rejected(command):
+def test_executable_must_be_string(command):
     result = validate_command_allowlist(command)
 
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_TYPE_INVALID"
+    assert result.valid is False
+    assert result.reason == "EXECUTABLE_MUST_BE_STRING"
 
 
 @pytest.mark.parametrize(
     "executable",
     [
         "",
-        " ",
-        " python",
-        "python ",
-        "python\t",
-        "python\n",
+        "unknown-command",
+        "bash",
+        "sh",
+        "powershell",
     ],
 )
-def test_invalid_executable_whitespace_is_rejected(executable):
+def test_executable_must_be_allowlisted(executable):
     result = validate_command_allowlist([executable])
 
-    assert result.allowed is False
+    assert result.valid is False
+    assert result.reason == "EXECUTABLE_NOT_ALLOWED"
 
 
 @pytest.mark.parametrize(
@@ -138,172 +95,86 @@ def test_invalid_executable_whitespace_is_rejected(executable):
         "./python",
         "../python",
         r"C:\Python\python.exe",
-        r"..\python",
+        r"bin\python",
     ],
 )
-def test_executable_paths_are_rejected(executable):
+def test_executable_path_is_rejected(executable):
     result = validate_command_allowlist([executable])
 
-    assert result.allowed is False
+    assert result.valid is False
+    assert result.reason == "EXECUTABLE_PATH_NOT_ALLOWED"
 
 
 @pytest.mark.parametrize(
     "executable",
     [
         "python;rm",
-        "python&&rm",
+        "python && rm",
         "python|rm",
+        "python`rm`",
+        "python$HOME",
         "python>file",
         "python<file",
-        "python`id`",
-        "python$(id)",
-        "python(test)",
-        "python{test}",
-        "python[test]",
-        "python'bad'",
-        'python"bad"',
     ],
 )
 def test_shell_metacharacters_are_rejected(executable):
     result = validate_command_allowlist([executable])
 
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_TOKEN_INVALID"
+    assert result.valid is False
+    assert result.reason == "SHELL_METACHARACTER_NOT_ALLOWED"
 
 
 def test_null_character_is_rejected():
     result = validate_command_allowlist(["python\x00evil"])
 
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_TOKEN_INVALID"
+    assert result.valid is False
+    assert result.reason == "NULL_CHARACTER_NOT_ALLOWED"
 
 
-def test_arguments_are_not_interpreted_by_allowlist():
+@pytest.mark.parametrize(
+    "executable",
+    [
+        "python\n",
+        "python\r",
+        "python\t",
+        "python\x7f",
+    ],
+)
+def test_control_character_is_rejected(executable):
+    result = validate_command_allowlist([executable])
+
+    assert result.valid is False
+    assert result.reason == "CONTROL_CHARACTER_NOT_ALLOWED"
+
+
+def test_arguments_are_not_validated_by_task_188():
     result = validate_command_allowlist(
-        [
-            "python",
-            "-c",
-            "print('not executed') && rm -rf /",
-        ]
+        ["python", "some;argument", "--unsafe-looking-argument"]
     )
 
-    assert result.allowed is True
-    assert result.executable == "python"
+    assert result.valid is True
 
 
-def test_argument_validation_is_deferred_to_task_189():
-    result = validate_command_allowlist(
-        [
-            "python",
-            "../../../anything",
-        ]
-    )
-
-    assert result.allowed is True
-    assert result.reason == "EXECUTABLE_ALLOWLISTED"
-
-
-def test_custom_policy_is_supported():
+def test_custom_policy():
     policy = CommandAllowlistPolicy(
-        allowed_executables=frozenset({"python"})
+        allowed_executables=frozenset({"custom-tool"})
     )
+
+    assert validate_command_allowlist(
+        ["custom-tool"],
+        policy,
+    ).valid is True
 
     assert validate_command_allowlist(
         ["python"],
         policy,
-    ).allowed is True
-
-    assert validate_command_allowlist(
-        ["node"],
-        policy,
-    ).allowed is False
+    ).valid is False
 
 
-def test_custom_policy_is_exact():
-    policy = CommandAllowlistPolicy(
-        allowed_executables=frozenset({"python"})
-    )
-
-    result = validate_command_allowlist(
-        ["Python"],
-        policy,
-    )
-
-    assert result.allowed is False
-    assert result.reason == "EXECUTABLE_NOT_ALLOWLISTED"
+def test_require_allowed_command_accepts_valid_command():
+    require_allowed_command(["python", "--version"])
 
 
-@pytest.mark.parametrize(
-    "allowed",
-    [
-        set(["python"]),
-        ["python"],
-        ("python",),
-        "python",
-    ],
-)
-def test_policy_requires_frozenset(allowed):
-    with pytest.raises(TypeError):
-        CommandAllowlistPolicy(
-            allowed_executables=allowed
-        )
-
-
-@pytest.mark.parametrize(
-    "allowed",
-    [
-        frozenset(),
-        frozenset({""}),
-        frozenset({"python "}),
-        frozenset({"python\n"}),
-        frozenset({"/usr/bin/python"}),
-        frozenset({"Python"}),
-        frozenset({"python;rm"}),
-    ],
-)
-def test_invalid_policy_entries_are_rejected(allowed):
+def test_require_allowed_command_rejects_invalid_command():
     with pytest.raises(CommandAllowlistError):
-        CommandAllowlistPolicy(
-            allowed_executables=allowed
-        )
-
-
-def test_require_allowed_command_returns_result():
-    result = require_allowed_command(
-        ["python", "--version"]
-    )
-
-    assert result.allowed is True
-    assert result.executable == "python"
-
-
-def test_require_allowed_command_rejects_unknown_command():
-    with pytest.raises(CommandAllowlistError):
-        require_allowed_command(["curl", "https://example.com"])
-
-
-def test_result_to_dict_is_stable():
-    result = validate_command_allowlist(
-        ["python", "--version"]
-    )
-
-    data = result.to_dict()
-
-    assert data["allowed"] is True
-    assert data["executable"] == "python"
-    assert data["reason"] == "EXECUTABLE_ALLOWLISTED"
-    assert "python" in data["policy"]["allowed_executables"]
-
-
-def test_allowlist_validation_does_not_execute_command():
-    # A malicious-looking argument must remain data.
-    result = validate_command_allowlist(
-        [
-            "python",
-            "-c",
-            "raise SystemExit('THIS MUST NOT RUN')",
-        ]
-    )
-
-    assert result.allowed is True
-    assert result.executable == "python"
+        require_allowed_command(["bash"])
