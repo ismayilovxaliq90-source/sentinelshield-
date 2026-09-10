@@ -3,275 +3,228 @@ from pathlib import Path
 import pytest
 
 from sentinelshield.dependency_version_verification import (
+    ActualDependency,
     DependencyVersionMismatch,
     DependencyVersionVerificationError,
-    DependencyVersionVerificationRequest,
-    ExpectedDependencyVersion,
-    ResolvedDependencyVersion,
-    is_valid_version,
-    normalize_name,
+    ExpectedDependency,
+    DependencyVersionVerificationResult,
+    normalize_version,
+    validate_manifest_path,
     validate_verification_result,
     verify_dependency_versions,
 )
 
 
-def make_request(tmp_path, expected, resolved):
-    return DependencyVersionVerificationRequest(
-        repository_root=tmp_path,
-        expected=expected,
-        resolved=resolved,
+def make_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".git").mkdir()
+    (root / "package.json").write_text(
+        '{"name":"fixture","version":"1.0.0"}',
+        encoding="utf-8",
     )
+    return root
 
 
-def test_normalize_name():
-    assert normalize_name(" Requests ") == "requests"
-    assert normalize_name("My_Package") == "my-package"
-    assert normalize_name("my.package") == "my-package"
+def test_version_normalization():
+    assert normalize_version(" 1.2.3 ") == "1.2.3"
+    assert normalize_version("v1.2.3") == "1.2.3"
 
 
-def test_normalize_name_rejects_invalid_values():
+def test_invalid_version_rejected():
     with pytest.raises(DependencyVersionVerificationError):
-        normalize_name("")
-
-    with pytest.raises(DependencyVersionVerificationError):
-        normalize_name("   ")
-
-    with pytest.raises(DependencyVersionVerificationError):
-        normalize_name("bad\x00name")
-
-    with pytest.raises(DependencyVersionVerificationError):
-        normalize_name(123)  # type: ignore[arg-type]
+        normalize_version("not-a-version")
 
 
-@pytest.mark.parametrize(
-    "version",
-    [
-        "1",
-        "1.2",
-        "1.2.3",
-        "1.2.3.4",
-        "1.2.3-alpha",
-        "1.2.3+build.1",
-        "1.2.3-alpha+build.1",
-    ],
-)
-def test_valid_versions(version):
-    assert is_valid_version(version) is True
-
-
-@pytest.mark.parametrize(
-    "version",
-    [
-        "",
-        " ",
-        "latest",
-        "^1.2.3",
-        "~1.2.3",
-        "1.x",
-        "v1.2.3",
-    ],
-)
-def test_invalid_versions(version):
-    assert is_valid_version(version) is False
-
-
-def test_expected_dependency_requires_valid_version():
-    with pytest.raises(DependencyVersionVerificationError):
-        ExpectedDependencyVersion("requests", "latest")
-
-
-def test_resolved_dependency_requires_valid_version():
-    with pytest.raises(DependencyVersionVerificationError):
-        ResolvedDependencyVersion("requests", "bad")
-
-
-def test_all_versions_match(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-        ExpectedDependencyVersion("urllib3", "2.5.0"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.32.4"),
-        ResolvedDependencyVersion("urllib3", "2.5.0"),
-    ]
-
+def test_exact_version_match():
     result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
+        manager="npm",
+        expected=(
+            ExpectedDependency("is-number", "7.0.0"),
+        ),
+        actual=(
+            ActualDependency("is-number", "7.0.0"),
+        ),
     )
 
-    assert result.valid is True
-    assert result.missing == []
-    assert result.unexpected == []
-    assert result.mismatches == []
-    assert result.duplicates == []
-    assert result.errors == []
-    assert validate_verification_result(result) is True
+    assert result.success is True
+    assert result.missing == ()
+    assert result.unexpected == ()
+    assert result.mismatches == ()
+    assert len(result.verified) == 1
 
 
-def test_missing_dependency(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-        ExpectedDependencyVersion("urllib3", "2.5.0"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.32.4"),
-    ]
-
+def test_version_mismatch_detected():
     result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
+        manager="npm",
+        expected=(
+            ExpectedDependency("is-number", "7.0.0"),
+        ),
+        actual=(
+            ActualDependency("is-number", "6.0.0"),
+        ),
     )
 
-    assert result.valid is False
-    assert result.missing == ["urllib3"]
-    assert validate_verification_result(result) is False
-
-
-def test_unexpected_dependency(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.32.4"),
-        ResolvedDependencyVersion("urllib3", "2.5.0"),
-    ]
-
-    result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
-    )
-
-    assert result.valid is False
-    assert result.unexpected == ["urllib3"]
-
-
-def test_version_mismatch(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.31.0"),
-    ]
-
-    result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
-    )
-
-    assert result.valid is False
-    assert result.mismatches == [
+    assert result.success is False
+    assert result.mismatches == (
         DependencyVersionMismatch(
-            name="requests",
-            expected_version="2.32.4",
-            actual_version="2.31.0",
+            name="is-number",
+            expected=("7.0.0",),
+            actual=("6.0.0",),
+        ),
+    )
+
+
+def test_missing_dependency_detected():
+    result = verify_dependency_versions(
+        manager="npm",
+        expected=(
+            ExpectedDependency("is-number", "7.0.0"),
+        ),
+        actual=(),
+    )
+
+    assert result.success is False
+    assert result.missing == ("is-number",)
+
+
+def test_unexpected_dependency_detected():
+    result = verify_dependency_versions(
+        manager="npm",
+        expected=(),
+        actual=(
+            ActualDependency("is-number", "7.0.0"),
+        ),
+    )
+
+    assert result.success is False
+    assert result.unexpected == ("is-number",)
+
+
+def test_multiple_versions_are_detected():
+    result = verify_dependency_versions(
+        manager="npm",
+        expected=(
+            ExpectedDependency("foo", "1.0.0"),
+        ),
+        actual=(
+            ActualDependency("foo", "1.0.0"),
+            ActualDependency("foo", "2.0.0"),
+        ),
+    )
+
+    assert result.success is True
+    assert result.duplicate_versions["foo"] == (
+        "1.0.0",
+        "2.0.0",
+    )
+
+
+def test_duplicate_versions_with_no_expected_match_fail():
+    result = verify_dependency_versions(
+        manager="npm",
+        expected=(
+            ExpectedDependency("foo", "3.0.0"),
+        ),
+        actual=(
+            ActualDependency("foo", "1.0.0"),
+            ActualDependency("foo", "2.0.0"),
+        ),
+    )
+
+    assert result.success is False
+    assert "DEPENDENCY_VERSION_MISMATCH" in result.errors
+
+
+def test_manager_is_normalized():
+    result = verify_dependency_versions(
+        manager=" NPM ",
+        expected=(
+            ExpectedDependency("foo", "1.0.0"),
+        ),
+        actual=(
+            ActualDependency("foo", "1.0.0"),
+        ),
+    )
+
+    assert result.manager == "npm"
+
+
+def test_unknown_manager_rejected():
+    with pytest.raises(DependencyVersionVerificationError):
+        verify_dependency_versions(
+            manager="unknown",
+            expected=(),
+            actual=(),
         )
-    ]
 
 
-def test_duplicate_expected_dependency(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-        ExpectedDependencyVersion("Requests", "2.32.4"),
-    ]
+def test_manifest_must_be_inside_repository(tmp_path):
+    root = make_repo(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
 
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.32.4"),
-    ]
+    with pytest.raises(DependencyVersionVerificationError):
+        validate_manifest_path(root, outside)
 
-    result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
+
+def test_manifest_symlink_rejected(tmp_path):
+    root = make_repo(tmp_path)
+    real = root / "real.json"
+    real.write_text("{}", encoding="utf-8")
+
+    manifest = root / "link.json"
+    manifest.symlink_to(real)
+
+    with pytest.raises(DependencyVersionVerificationError):
+        validate_manifest_path(root, manifest)
+
+
+def test_result_validation():
+    result = DependencyVersionVerificationResult(
+        success=True,
+        manager="npm",
+        verified=(
+            ActualDependency(
+                name="foo",
+                version="1.0.0",
+            ),
+        ),
+        missing=(),
+        unexpected=(),
+        mismatches=(),
+        duplicate_versions={},
+        errors=(),
     )
 
-    assert result.valid is False
-    assert result.duplicates == ["requests"]
-
-
-def test_duplicate_resolved_dependency(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.32.4"),
-        ResolvedDependencyVersion("Requests", "2.32.4"),
-    ]
-
-    result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
-    )
-
-    assert result.valid is False
-    assert result.duplicates == ["requests"]
-
-
-def test_names_are_compared_normalized(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("My_Package", "1.2.3"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("my.package", "1.2.3"),
-    ]
-
-    result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
-    )
-
-    assert result.valid is True
-
-
-def test_empty_dependency_sets_are_valid(tmp_path):
-    result = verify_dependency_versions(
-        make_request(tmp_path, [], [])
-    )
-
-    assert result.valid is True
     assert validate_verification_result(result) is True
 
 
-def test_relative_repository_root_rejected(tmp_path):
-    with pytest.raises(DependencyVersionVerificationError):
-        DependencyVersionVerificationRequest(
-            repository_root=Path("relative"),
-            expected=[],
-            resolved=[],
-        )
-
-
-def test_missing_repository_root_rejected(tmp_path):
-    missing = tmp_path / "does-not-exist"
-
-    request = make_request(
-        missing,
-        [],
-        [],
-    )
-
-    with pytest.raises(DependencyVersionVerificationError):
-        verify_dependency_versions(request)
-
-
-def test_result_serialization(tmp_path):
-    expected = [
-        ExpectedDependencyVersion("requests", "2.32.4"),
-    ]
-
-    resolved = [
-        ResolvedDependencyVersion("requests", "2.31.0"),
-    ]
-
+def test_result_serialization():
     result = verify_dependency_versions(
-        make_request(tmp_path, expected, resolved)
+        manager="npm",
+        expected=(
+            ExpectedDependency("foo", "1.0.0"),
+        ),
+        actual=(
+            ActualDependency("foo", "1.0.0"),
+        ),
     )
 
-    payload = result.to_dict()
+    data = result.to_dict()
 
-    assert payload["valid"] is False
-    assert payload["repository_root"] == str(tmp_path.resolve())
-    assert len(payload["mismatches"]) == 1
+    assert data["success"] is True
+    assert data["manager"] == "npm"
+    assert data["verified"][0]["name"] == "foo"
+    assert data["verified"][0]["version"] == "1.0.0"
 
-    json_text = result.to_json()
 
-    assert '"valid": false' in json_text
-    assert '"requests"' in json_text
+def test_empty_expected_and_actual_is_valid():
+    result = verify_dependency_versions(
+        manager="npm",
+        expected=(),
+        actual=(),
+    )
+
+    assert result.success is True
+    assert validate_verification_result(result) is True

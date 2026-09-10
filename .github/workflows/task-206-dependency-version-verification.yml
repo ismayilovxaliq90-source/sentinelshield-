@@ -18,7 +18,6 @@ permissions:
 
 jobs:
   task-206:
-    name: Validate TASK 206
     runs-on: ubuntu-latest
 
     env:
@@ -30,109 +29,234 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
 
-      - name: Install test dependency
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pytest
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install --disable-pip-version-check pytest
 
-      - name: Verify source import path
+      - name: Verify module import
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
-          import os
-          import sys
-
-          expected = os.path.join(
-              os.environ["GITHUB_WORKSPACE"],
-              "src",
-          )
-
-          assert expected in sys.path, (
-              f"src path missing from sys.path: {expected}"
-          )
-
-          import sentinelshield
-          from sentinelshield.dependency_version_verification import (
-              verify_dependency_versions,
-          )
-
-          print("TASK 206 import check: PASS")
-          print(f"PYTHONPATH={os.environ.get('PYTHONPATH')}")
-          print(f"sentinelshield={sentinelshield.__file__}")
-          print(f"verify_dependency_versions={verify_dependency_versions}")
+          python -c "import sentinelshield.dependency_version_verification"
 
       - name: Run TASK 206 unit tests
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          PYTHONDONTWRITEBYTECODE=1 python -m pytest \
-            tests/test_dependency_version_verification.py \
-            -q
+          python -m pytest -q tests/test_dependency_version_verification.py
 
-      - name: Run live TASK 206 validation
+      - name: Create isolated real npm fixture
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          set -euo pipefail
 
-          PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
-          import tempfile
+          FIXTURE="$RUNNER_TEMP/task-206-fixture"
+
+          rm -rf "$FIXTURE"
+          mkdir -p "$FIXTURE"
+          cd "$FIXTURE"
+
+          git init -q
+
+          cat > package.json <<'JSON'
+          {
+            "name": "sentinelshield-task-206-fixture",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "is-number": "7.0.0"
+            }
+          }
+          JSON
+
+          npm install \
+            --package-lock-only \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+
+      - name: Execute real TASK 206 verification
+        run: |
+          set -euo pipefail
+
+          FIXTURE="$RUNNER_TEMP/task-206-fixture"
+
+          cat > "$RUNNER_TEMP/task_206_live_check.py" <<'PY'
+          import json
+          import subprocess
+          import sys
           from pathlib import Path
 
+          sys.path.insert(0, "${GITHUB_WORKSPACE}/src")
+
           from sentinelshield.dependency_version_verification import (
-              DependencyVersionVerificationRequest,
-              ExpectedDependencyVersion,
-              ResolvedDependencyVersion,
+              ActualDependency,
+              ExpectedDependency,
               validate_verification_result,
-              verify_dependency_versions,
+              verify_repository_manifest,
           )
 
-          with tempfile.TemporaryDirectory() as directory:
-              root = Path(directory)
+          root = Path("${RUNNER_TEMP}/task-206-fixture")
+          package_json = root / "package.json"
 
-              expected = [
-                  ExpectedDependencyVersion("requests", "2.32.4"),
-                  ExpectedDependencyVersion("urllib3", "2.5.0"),
-              ]
+          completed = subprocess.run(
+              [
+                  "npm",
+                  "ls",
+                  "is-number",
+                  "--json",
+                  "--package-lock-only",
+                  "--depth=0",
+              ],
+              cwd=root,
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+              shell=False,
+              check=False,
+              close_fds=True,
+              timeout=60,
+          )
 
-              resolved = [
-                  ResolvedDependencyVersion("requests", "2.32.4"),
-                  ResolvedDependencyVersion("urllib3", "2.5.0"),
-              ]
-
-              request = DependencyVersionVerificationRequest(
-                  repository_root=root,
-                  expected=expected,
-                  resolved=resolved,
+          if completed.returncode != 0:
+              print(completed.stdout)
+              print(completed.stderr)
+              raise SystemExit(
+                  "TASK 206 FAIL: npm dependency lookup failed"
               )
 
-              result = verify_dependency_versions(request)
+          data = json.loads(completed.stdout)
 
-              assert result.valid is True
-              assert validate_verification_result(result) is True
-              assert result.missing == []
-              assert result.unexpected == []
-              assert result.mismatches == []
-              assert result.duplicates == []
-              assert result.errors == []
+          actual_version = (
+              data.get("dependencies", {})
+              .get("is-number", {})
+              .get("version")
+          )
 
-              print("TASK 206 LIVE VALIDATION: PASS")
-              print(result.to_json())
+          if actual_version is None:
+              raise SystemExit(
+                  "TASK 206 FAIL: actual is-number version missing"
+              )
 
-      - name: Detect Python bytecode changes
+          result = verify_repository_manifest(
+              repository_root=root,
+              manifest_path=package_json,
+              manager="npm",
+              expected=(
+                  ExpectedDependency(
+                      name="is-number",
+                      version="7.0.0",
+                  ),
+              ),
+              actual=(
+                  ActualDependency(
+                      name="is-number",
+                      version=actual_version,
+                  ),
+              ),
+          )
+
+          if not validate_verification_result(result):
+              print(result.to_dict())
+              raise SystemExit(
+                  "TASK 206 FAIL: verification result invalid"
+              )
+
+          if not result.success:
+              print(result.to_dict())
+              raise SystemExit(
+                  "TASK 206 FAIL: dependency version mismatch"
+              )
+
+          if actual_version != "7.0.0":
+              raise SystemExit(
+                  f"TASK 206 FAIL: expected 7.0.0, got {actual_version}"
+              )
+
+          print("TASK 206 PASS")
+          print("package: is-number")
+          print("expected: 7.0.0")
+          print("actual:", actual_version)
+          PY
+
+          PYTHONPATH="$GITHUB_WORKSPACE/src" \
+          PYTHONDONTWRITEBYTECODE=1 \
+          python "$RUNNER_TEMP/task_206_live_check.py"
+
+          rm -f "$RUNNER_TEMP/task_206_live_check.py"
+
+      - name: Verify lockfile and manifest consistency
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          set -euo pipefail
 
-          if git status --short --untracked-files=all | grep -E '(^|/)(__pycache__/|.*\.pyc$)'; then
-            echo "TASK 206 FAIL: Python bytecode changes detected"
+          FIXTURE="$RUNNER_TEMP/task-206-fixture"
+
+          test -f "$FIXTURE/package.json"
+          test -f "$FIXTURE/package-lock.json"
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("${RUNNER_TEMP}/task-206-fixture")
+
+          package = json.loads(
+              (root / "package.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          lockfile = json.loads(
+              (root / "package-lock.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          expected = (
+              package
+              .get("dependencies", {})
+              .get("is-number")
+          )
+
+          locked = (
+              lockfile
+              .get("packages", {})
+              .get("node_modules/is-number", {})
+              .get("version")
+          )
+
+          if expected != "7.0.0":
+              raise SystemExit(
+                  f"TASK 206 FAIL: manifest version is {expected}"
+              )
+
+          if locked != "7.0.0":
+              raise SystemExit(
+                  f"TASK 206 FAIL: lockfile version is {locked}"
+              )
+
+          print("manifest version:", expected)
+          print("lockfile version:", locked)
+          print("TASK 206 manifest/lockfile verification PASS")
+          PY
+
+      - name: Verify no bytecode changes
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain=v1 | grep -E '(^|[[:space:]])[^[:space:]]*\.pyc$|__pycache__'; then
+            echo "TASK 206 FAIL: bytecode changes detected"
             exit 1
           fi
 
-          echo "TASK 206 bytecode check: PASS"
-
-      - name: Final TASK 206 status
-        run: |
-          echo "TASK 206 GitHub validation completed."
+          echo "TASK 206 bytecode verification PASS"

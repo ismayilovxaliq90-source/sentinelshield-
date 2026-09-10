@@ -1,270 +1,422 @@
 from __future__ import annotations
 
-import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Iterable, Mapping
 
 
-class DependencyVersionVerificationError(ValueError):
-    """Raised when dependency version verification input is invalid."""
+class DependencyVersionVerificationError(RuntimeError):
+    """Raised when dependency version verification cannot be performed safely."""
 
 
-_VERSION_PATTERN = re.compile(
-    r"^[0-9]+(?:\.[0-9]+){0,3}"
-    r"(?:[-+][0-9A-Za-z.-]+)?$"
+VERSION_PATTERN = re.compile(
+    r"^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z.-]+)?$"
+)
+
+SUPPORTED_MANAGERS = frozenset(
+    {
+        "npm",
+        "pnpm",
+        "yarn",
+        "go",
+        "cargo",
+        "composer",
+        "poetry",
+    }
 )
 
 
-def normalize_name(name: str) -> str:
-    if not isinstance(name, str):
-        raise DependencyVersionVerificationError(
-            "Dependency name must be a string"
-        )
-
-    value = name.strip().lower()
-
-    if not value:
-        raise DependencyVersionVerificationError(
-            "Dependency name cannot be empty"
-        )
-
-    if "\x00" in value or any(ord(ch) < 32 for ch in value):
-        raise DependencyVersionVerificationError(
-            "Dependency name contains control characters"
-        )
-
-    return value.replace("_", "-").replace(".", "-")
-
-
-def is_valid_version(version: str) -> bool:
-    if not isinstance(version, str):
-        return False
-
-    value = version.strip()
-
-    if not value:
-        return False
-
-    return bool(_VERSION_PATTERN.fullmatch(value))
-
-
 @dataclass(frozen=True)
-class ResolvedDependencyVersion:
+class ExpectedDependency:
     name: str
     version: str
+    direct: bool = True
 
-    def __post_init__(self) -> None:
-        normalize_name(self.name)
-
-        if not is_valid_version(self.version):
-            raise DependencyVersionVerificationError(
-                f"Invalid resolved version for {self.name}: {self.version!r}"
-            )
-
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict:
         return {
-            "name": normalize_name(self.name),
-            "version": self.version.strip(),
+            "name": self.name,
+            "version": self.version,
+            "direct": self.direct,
         }
 
 
 @dataclass(frozen=True)
-class ExpectedDependencyVersion:
+class ActualDependency:
     name: str
     version: str
+    source: str = "dependency_tree"
 
-    def __post_init__(self) -> None:
-        normalize_name(self.name)
-
-        if not is_valid_version(self.version):
-            raise DependencyVersionVerificationError(
-                f"Invalid expected version for {self.name}: {self.version!r}"
-            )
-
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict:
         return {
-            "name": normalize_name(self.name),
-            "version": self.version.strip(),
+            "name": self.name,
+            "version": self.version,
+            "source": self.source,
         }
 
 
 @dataclass(frozen=True)
 class DependencyVersionMismatch:
     name: str
-    expected_version: str
-    actual_version: str
+    expected: tuple[str, ...]
+    actual: tuple[str, ...]
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict:
         return {
-            "name": normalize_name(self.name),
-            "expected_version": self.expected_version,
-            "actual_version": self.actual_version,
+            "name": self.name,
+            "expected": list(self.expected),
+            "actual": list(self.actual),
         }
-
-
-@dataclass
-class DependencyVersionVerificationResult:
-    valid: bool
-    repository_root: str
-    missing: list[str] = field(default_factory=list)
-    unexpected: list[str] = field(default_factory=list)
-    mismatches: list[DependencyVersionMismatch] = field(
-        default_factory=list
-    )
-    duplicates: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "valid": self.valid,
-            "repository_root": self.repository_root,
-            "missing": list(self.missing),
-            "unexpected": list(self.unexpected),
-            "mismatches": [
-                item.to_dict() for item in self.mismatches
-            ],
-            "duplicates": list(self.duplicates),
-            "errors": list(self.errors),
-        }
-
-    def to_json(self) -> str:
-        return json.dumps(
-            self.to_dict(),
-            indent=2,
-            sort_keys=True,
-        )
 
 
 @dataclass(frozen=True)
-class DependencyVersionVerificationRequest:
-    repository_root: Path
-    expected: Sequence[ExpectedDependencyVersion]
-    resolved: Sequence[ResolvedDependencyVersion]
+class DependencyVersionVerificationResult:
+    success: bool
+    manager: str
+    verified: tuple[ActualDependency, ...]
+    missing: tuple[str, ...]
+    unexpected: tuple[str, ...]
+    mismatches: tuple[DependencyVersionMismatch, ...]
+    duplicate_versions: Mapping[str, tuple[str, ...]]
+    errors: tuple[str, ...]
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.repository_root, Path):
-            raise DependencyVersionVerificationError(
-                "repository_root must be a pathlib.Path"
-            )
+    def to_dict(self) -> dict:
+        return {
+            "success": self.success,
+            "manager": self.manager,
+            "verified": [
+                item.to_dict()
+                for item in self.verified
+            ],
+            "missing": list(self.missing),
+            "unexpected": list(self.unexpected),
+            "mismatches": [
+                item.to_dict()
+                for item in self.mismatches
+            ],
+            "duplicate_versions": {
+                name: list(versions)
+                for name, versions in self.duplicate_versions.items()
+            },
+            "errors": list(self.errors),
+        }
 
-        if not self.repository_root.is_absolute():
-            raise DependencyVersionVerificationError(
-                "repository_root must be absolute"
-            )
 
-
-def _validate_repository_root(repository_root: Path) -> Path:
-    if not isinstance(repository_root, Path):
+def _normalize_name(name: str) -> str:
+    if not isinstance(name, str):
         raise DependencyVersionVerificationError(
-            "repository_root must be pathlib.Path"
+            "Dependency name must be a string"
         )
 
-    if not repository_root.is_absolute():
+    value = name.strip()
+
+    if not value:
         raise DependencyVersionVerificationError(
-            "repository_root must be absolute"
+            "Dependency name cannot be empty"
+        )
+
+    if "\x00" in value:
+        raise DependencyVersionVerificationError(
+            "Dependency name contains NULL character"
+        )
+
+    return value
+
+
+def normalize_version(version: str) -> str:
+    if not isinstance(version, str):
+        raise DependencyVersionVerificationError(
+            "Dependency version must be a string"
+        )
+
+    value = version.strip()
+
+    if not value:
+        raise DependencyVersionVerificationError(
+            "Dependency version cannot be empty"
+        )
+
+    if "\x00" in value:
+        raise DependencyVersionVerificationError(
+            "Dependency version contains NULL character"
+        )
+
+    # Verification intentionally accepts common leading
+    # semantic-version syntax but removes only harmless whitespace.
+    if value.startswith(("v", "V")):
+        value = value[1:]
+
+    if not VERSION_PATTERN.fullmatch(value):
+        raise DependencyVersionVerificationError(
+            f"Invalid dependency version: {version}"
+        )
+
+    return value
+
+
+def normalize_expected_dependencies(
+    dependencies: Iterable[ExpectedDependency],
+) -> tuple[ExpectedDependency, ...]:
+    if dependencies is None:
+        raise DependencyVersionVerificationError(
+            "Expected dependencies cannot be None"
+        )
+
+    normalized: list[ExpectedDependency] = []
+    seen: set[tuple[str, str, bool]] = set()
+
+    for dependency in dependencies:
+        if not isinstance(dependency, ExpectedDependency):
+            raise DependencyVersionVerificationError(
+                "Invalid expected dependency"
+            )
+
+        name = _normalize_name(dependency.name)
+        version = normalize_version(dependency.version)
+
+        item = ExpectedDependency(
+            name=name,
+            version=version,
+            direct=bool(dependency.direct),
+        )
+
+        key = (
+            item.name,
+            item.version,
+            item.direct,
+        )
+
+        if key not in seen:
+            normalized.append(item)
+            seen.add(key)
+
+    return tuple(normalized)
+
+
+def normalize_actual_dependencies(
+    dependencies: Iterable[ActualDependency],
+) -> tuple[ActualDependency, ...]:
+    if dependencies is None:
+        raise DependencyVersionVerificationError(
+            "Actual dependencies cannot be None"
+        )
+
+    normalized: list[ActualDependency] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for dependency in dependencies:
+        if not isinstance(dependency, ActualDependency):
+            raise DependencyVersionVerificationError(
+                "Invalid actual dependency"
+            )
+
+        name = _normalize_name(dependency.name)
+        version = normalize_version(dependency.version)
+
+        source = dependency.source.strip()
+
+        if not source:
+            raise DependencyVersionVerificationError(
+                "Dependency source cannot be empty"
+            )
+
+        item = ActualDependency(
+            name=name,
+            version=version,
+            source=source,
+        )
+
+        key = (
+            item.name,
+            item.version,
+            item.source,
+        )
+
+        if key not in seen:
+            normalized.append(item)
+            seen.add(key)
+
+    return tuple(normalized)
+
+
+def _validate_repository_root(
+    repository_root: Path,
+) -> Path:
+    if not isinstance(repository_root, Path):
+        raise DependencyVersionVerificationError(
+            "repository_root must be a Path"
         )
 
     try:
-        resolved = repository_root.resolve(strict=True)
-    except OSError as error:
+        root = repository_root.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
         raise DependencyVersionVerificationError(
             f"Unable to resolve repository root: {repository_root}"
-        ) from error
+        ) from exc
 
-    if not resolved.is_dir():
+    if not root.is_dir():
         raise DependencyVersionVerificationError(
-            f"Repository root is not a directory: {resolved}"
+            f"Repository root is not a directory: {root}"
+        )
+
+    if not (root / ".git").exists():
+        raise DependencyVersionVerificationError(
+            f"Not a Git repository: {root}"
+        )
+
+    return root
+
+
+def validate_manifest_path(
+    repository_root: Path,
+    manifest_path: Path,
+) -> Path:
+    root = _validate_repository_root(repository_root)
+
+    if not isinstance(manifest_path, Path):
+        raise DependencyVersionVerificationError(
+            "manifest_path must be a Path"
+        )
+
+    if manifest_path.is_symlink():
+        raise DependencyVersionVerificationError(
+            f"Manifest symlink is not allowed: {manifest_path}"
+        )
+
+    try:
+        resolved = manifest_path.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise DependencyVersionVerificationError(
+            f"Unable to resolve manifest: {manifest_path}"
+        ) from exc
+
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise DependencyVersionVerificationError(
+            f"Manifest escapes repository root: {manifest_path}"
+        ) from exc
+
+    if not resolved.is_file():
+        raise DependencyVersionVerificationError(
+            f"Manifest is not a regular file: {resolved}"
         )
 
     return resolved
 
 
-def _build_map(
-    dependencies: Sequence[
-        ExpectedDependencyVersion | ResolvedDependencyVersion
-    ],
-) -> tuple[dict[str, str], list[str]]:
-    values: dict[str, str] = {}
-    duplicates: list[str] = []
+def validate_manager(manager: str) -> str:
+    if not isinstance(manager, str):
+        raise DependencyVersionVerificationError(
+            "manager must be a string"
+        )
+
+    normalized = manager.strip().lower()
+
+    if normalized not in SUPPORTED_MANAGERS:
+        raise DependencyVersionVerificationError(
+            f"Unsupported package manager: {manager}"
+        )
+
+    return normalized
+
+
+def _versions_by_name(
+    dependencies: Iterable[ActualDependency],
+) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
 
     for dependency in dependencies:
-        name = normalize_name(dependency.name)
-        version = dependency.version.strip()
+        result.setdefault(dependency.name, set()).add(
+            dependency.version
+        )
 
-        if name in values:
-            if name not in duplicates:
-                duplicates.append(name)
-            continue
-
-        values[name] = version
-
-    return values, sorted(duplicates)
+    return result
 
 
 def verify_dependency_versions(
-    request: DependencyVersionVerificationRequest,
+    *,
+    manager: str,
+    expected: Iterable[ExpectedDependency],
+    actual: Iterable[ActualDependency],
 ) -> DependencyVersionVerificationResult:
-    repository_root = _validate_repository_root(request.repository_root)
+    normalized_manager = validate_manager(manager)
 
-    errors: list[str] = []
+    expected_items = normalize_expected_dependencies(expected)
+    actual_items = normalize_actual_dependencies(actual)
 
-    try:
-        expected_map, expected_duplicates = _build_map(request.expected)
-        resolved_map, resolved_duplicates = _build_map(request.resolved)
-    except (TypeError, AttributeError, ValueError) as error:
-        return DependencyVersionVerificationResult(
-            valid=False,
-            repository_root=str(repository_root),
-            errors=[str(error)],
-        )
+    expected_by_name: dict[str, set[str]] = {}
 
-    duplicates = sorted(
-        set(expected_duplicates) | set(resolved_duplicates)
-    )
+    for dependency in expected_items:
+        expected_by_name.setdefault(
+            dependency.name,
+            set(),
+        ).add(dependency.version)
 
-    missing = sorted(
-        set(expected_map) - set(resolved_map)
-    )
+    actual_by_name = _versions_by_name(actual_items)
 
-    unexpected = sorted(
-        set(resolved_map) - set(expected_map)
-    )
-
+    missing: list[str] = []
+    unexpected: list[str] = []
     mismatches: list[DependencyVersionMismatch] = []
+    verified: list[ActualDependency] = []
 
-    for name in sorted(set(expected_map) & set(resolved_map)):
-        expected_version = expected_map[name]
-        actual_version = resolved_map[name]
+    for name in sorted(expected_by_name):
+        expected_versions = expected_by_name[name]
+        actual_versions = actual_by_name.get(name, set())
 
-        if expected_version != actual_version:
+        if not actual_versions:
+            missing.append(name)
+            continue
+
+        if expected_versions.isdisjoint(actual_versions):
             mismatches.append(
                 DependencyVersionMismatch(
                     name=name,
-                    expected_version=expected_version,
-                    actual_version=actual_version,
+                    expected=tuple(sorted(expected_versions)),
+                    actual=tuple(sorted(actual_versions)),
                 )
             )
+            continue
 
-    valid = not any(
-        (
-            missing,
-            unexpected,
-            mismatches,
-            duplicates,
-            errors,
-        )
-    )
+        for dependency in actual_items:
+            if (
+                dependency.name == name
+                and dependency.version in expected_versions
+            ):
+                verified.append(dependency)
+
+    for name in sorted(actual_by_name):
+        if name not in expected_by_name:
+            unexpected.append(name)
+
+    duplicates = {
+        name: tuple(sorted(versions))
+        for name, versions in sorted(actual_by_name.items())
+        if len(versions) > 1
+    }
+
+    errors: list[str] = []
+
+    if missing:
+        errors.append("MISSING_DEPENDENCIES")
+
+    if unexpected:
+        errors.append("UNEXPECTED_DEPENDENCIES")
+
+    if mismatches:
+        errors.append("DEPENDENCY_VERSION_MISMATCH")
+
+    success = not errors
 
     return DependencyVersionVerificationResult(
-        valid=valid,
-        repository_root=str(repository_root),
-        missing=missing,
-        unexpected=unexpected,
-        mismatches=mismatches,
-        duplicates=duplicates,
-        errors=errors,
+        success=success,
+        manager=normalized_manager,
+        verified=tuple(verified),
+        missing=tuple(missing),
+        unexpected=tuple(unexpected),
+        mismatches=tuple(mismatches),
+        duplicate_versions=duplicates,
+        errors=tuple(errors),
     )
 
 
@@ -277,28 +429,64 @@ def validate_verification_result(
     ):
         return False
 
-    if not isinstance(result.valid, bool):
+    if result.manager not in SUPPORTED_MANAGERS:
         return False
 
-    if not isinstance(result.repository_root, str):
-        return False
+    for dependency in result.verified:
+        if not isinstance(dependency, ActualDependency):
+            return False
 
-    if not result.repository_root.strip():
-        return False
+        try:
+            _normalize_name(dependency.name)
+            normalize_version(dependency.version)
+        except DependencyVersionVerificationError:
+            return False
 
-    if result.missing:
-        return False
+    if result.success:
+        if result.missing:
+            return False
+        if result.unexpected:
+            return False
+        if result.mismatches:
+            return False
+        if result.errors:
+            return False
 
-    if result.unexpected:
-        return False
+    return True
 
-    if result.mismatches:
-        return False
 
-    if result.duplicates:
-        return False
+def verify_repository_manifest(
+    repository_root: Path,
+    manifest_path: Path,
+    manager: str,
+    expected: Iterable[ExpectedDependency],
+    actual: Iterable[ActualDependency],
+) -> DependencyVersionVerificationResult:
+    validate_manifest_path(
+        repository_root,
+        manifest_path,
+    )
 
-    if result.errors:
-        return False
+    return verify_dependency_versions(
+        manager=manager,
+        expected=expected,
+        actual=actual,
+    )
 
-    return result.valid is True
+
+__all__ = [
+    "DependencyVersionVerificationError",
+    "ExpectedDependency",
+    "ActualDependency",
+    "DependencyVersionMismatch",
+    "DependencyVersionVerificationResult",
+    "SUPPORTED_MANAGERS",
+    "normalize_version",
+    "normalize_expected_dependencies",
+    "normalize_actual_dependencies",
+    "validate_manifest_path",
+    "validate_manager",
+    "verify_dependency_versions",
+    "validate_verification_result",
+    "verify_repository_manifest",
+]
