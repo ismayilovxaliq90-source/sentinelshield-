@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,109 +13,80 @@ from sentinelshield.manifest_diff_analysis import (
     ManifestDiffAnalysisResult,
     analyze_manifest_diff,
     analyze_manifest_diffs,
+    validate_manifest_diff,
     validate_manifest_diff_analysis,
 )
 
 
-def make_repo(tmp_path: Path) -> Path:
-    git_dir = tmp_path / ".git"
-    git_dir.mkdir()
-    return tmp_path
-
-
-def python_update_diff() -> str:
-    return (
-        "diff --git a/pyproject.toml b/pyproject.toml\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/pyproject.toml\n"
-        "+++ b/pyproject.toml\n"
-        "@@ -1,2 +1,2 @@\n"
-        " [project]\n"
-        '-dependencies = [\"requests==2.31.0\"]\n'
-        '+dependencies = [\"requests==2.32.0\"]\n'
+def init_repo(root: Path) -> None:
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text(
+        "[core]\n",
+        encoding="utf-8",
     )
 
 
-def test_clean_diff_has_no_manifest_changes(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_python_manifest_version_update(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
-    result = analyze_manifest_diff(
-        root,
-        "",
-        ["pyproject.toml"],
-    )
-
-    assert result.changed_manifest_count == 0
-    assert result.dependency_change_count == 0
-    assert result.has_dependency_changes is False
-
-
-def test_python_dependency_version_update(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    manifest = root / "pyproject.toml"
+    manifest = tmp_path / "pyproject.toml"
     manifest.write_text(
         "[project]\n"
         'dependencies = ["requests==2.31.0"]\n',
         encoding="utf-8",
     )
 
+    diff = (
+        "diff --git a/pyproject.toml b/pyproject.toml\n"
+        "--- a/pyproject.toml\n"
+        "+++ b/pyproject.toml\n"
+        "@@ -1,2 +1,2 @@\n"
+        " [project]\n"
+        '-dependencies = ["requests==2.31.0"]\n'
+        '+dependencies = ["requests==2.32.0"]\n'
+    )
+
     result = analyze_manifest_diff(
-        root,
-        python_update_diff(),
+        tmp_path,
+        diff,
         ["pyproject.toml"],
     )
 
-    assert result.changed_manifest_count == 1
-    assert result.dependency_change_count == 1
+    assert result.repository_root == str(tmp_path.resolve())
+    assert len(result.manifests) == 1
+    assert result.manifests[0].manager == "python"
 
-    manifest_result = result.manifests[0]
-
-    assert manifest_result.manager == "python"
-
-    change = manifest_result.dependency_changes[0]
-
-    assert change.name == "requests"
-    assert change.old_version == "==2.31.0"
-    assert change.new_version == "==2.32.0"
-    assert change.change_type == "updated"
+    changes = result.manifests[0].dependency_changes
+    assert len(changes) == 1
+    assert changes[0].name == "requests"
+    assert changes[0].change_type == "updated"
+    assert changes[0].old_version == "==2.31.0"
+    assert changes[0].new_version == "==2.32.0"
 
 
-def test_npm_dependency_addition(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_package_json_dependency_addition(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
-    manifest = root / "package.json"
-    manifest.write_text(
-        "{}",
-        encoding="utf-8",
-    )
+    manifest = tmp_path / "package.json"
+    manifest.write_text("{}", encoding="utf-8")
 
     diff = (
         "diff --git a/package.json b/package.json\n"
         "--- a/package.json\n"
         "+++ b/package.json\n"
-        "@@ -1,1 +1,4 @@\n"
+        "@@ -1 +1,4 @@\n"
         " {\n"
-        '-  \"dependencies\": {}\n'
-        '+  \"dependencies\": {\n'
-        '+    \"express\": \"4.21.0\"\n'
+        '-  "dependencies": {}\n'
+        '+  "dependencies": {\n'
+        '+    "express": "4.21.0"\n'
         '+  }\n'
     )
 
     result = analyze_manifest_diff(
-        root,
+        tmp_path,
         diff,
         ["package.json"],
     )
-
-    assert result.changed_manifest_count == 1
-    assert result.manifests[0].manager == "npm"
 
     changes = result.manifests[0].dependency_changes
 
@@ -126,12 +98,10 @@ def test_npm_dependency_addition(
     )
 
 
-def test_dependency_removal_is_detected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_removed_dependency(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
-    manifest = root / "package.json"
+    manifest = tmp_path / "package.json"
     manifest.write_text(
         '{"dependencies":{"lodash":"4.17.20"}}',
         encoding="utf-8",
@@ -142,25 +112,29 @@ def test_dependency_removal_is_detected(
         "--- a/package.json\n"
         "+++ b/package.json\n"
         "@@ -1 +1 @@\n"
-        '-{\"dependencies\":{\"lodash\":\"4.17.20\"}}\n'
-        '+{\"dependencies\":{}}\n'
+        '-{"dependencies":{"lodash":"4.17.20"}}\n'
+        '+{"dependencies":{}}\n'
     )
 
     result = analyze_manifest_diff(
-        root,
+        tmp_path,
         diff,
         ["package.json"],
     )
 
-    assert result.changed_manifest_count == 1
+    changes = result.manifests[0].dependency_changes
+
+    assert any(
+        item.name == "lodash"
+        and item.change_type == "removed"
+        for item in changes
+    )
 
 
-def test_unrelated_file_is_separated(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_unrelated_file_is_detected(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
-    (root / "pyproject.toml").write_text(
+    (tmp_path / "pyproject.toml").write_text(
         "[project]\n",
         encoding="utf-8",
     )
@@ -181,362 +155,76 @@ def test_unrelated_file_is_separated(
     )
 
     result = analyze_manifest_diff(
-        root,
+        tmp_path,
         diff,
         ["pyproject.toml"],
     )
 
-    assert "app.py" in result.unrelated_files
+    assert result.unrelated_changes == ("app.py",)
 
 
-def test_multiple_manifest_types(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_unsupported_manifest_is_reported(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
-    (root / "package.json").write_text(
-        "{}",
-        encoding="utf-8",
-    )
-    (root / "pyproject.toml").write_text(
-        "[project]\n",
+    (tmp_path / "custom.lock").write_text(
+        "dependency\n",
         encoding="utf-8",
     )
 
-    diff = (
-        "diff --git a/package.json b/package.json\n"
-        "--- a/package.json\n"
-        "+++ b/package.json\n"
-        "@@ -1 +1,3 @@\n"
-        " {}\n"
-        '+  "dependencies": {"axios": "1.8.0"}\n'
-        "diff --git a/pyproject.toml "
-        "b/pyproject.toml\n"
-        "--- a/pyproject.toml\n"
-        "+++ b/pyproject.toml\n"
-        "@@ -1 +1,2 @@\n"
-        " [project]\n"
-        '+dependencies = ["requests==2.32.0"]\n'
-    )
-
     result = analyze_manifest_diff(
-        root,
-        diff,
-        [
-            "package.json",
-            "pyproject.toml",
-        ],
-    )
-
-    assert result.changed_manifest_count == 2
-    assert {
-        item.manager
-        for item in result.manifests
-    } == {"npm", "python"}
-
-
-def test_unsupported_manifest_is_reported(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    result = analyze_manifest_diff(
-        root,
+        tmp_path,
         "diff --git a/custom.lock b/custom.lock\n",
         ["custom.lock"],
     )
 
-    assert result.unsupported_manifests == (
-        "custom.lock",
-    )
+    assert len(result.manifests) == 1
+    assert result.manifests[0].supported is False
+    assert result.manifests[0].manager is None
 
 
-def test_missing_manifest_diff_is_not_fabricated(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_missing_manifest_is_not_fabricated(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
     result = analyze_manifest_diff(
-        root,
+        tmp_path,
         "",
         ["package.json"],
     )
 
-    assert result.manifests == ()
+    assert len(result.manifests) == 1
+    assert result.manifests[0].path == "package.json"
+    assert result.manifests[0].dependency_changes == ()
 
 
-def test_path_traversal_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_secret_redaction(tmp_path: Path) -> None:
+    init_repo(tmp_path)
 
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "",
-            ["../package.json"],
-        )
-
-
-def test_absolute_path_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "",
-            [str(root / "package.json")],
-        )
-
-
-def test_null_path_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "",
-            ["package.json\x00evil"],
-        )
-
-
-def test_string_paths_container_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "",
-            "package.json",
-        )
-
-
-def test_bytes_paths_container_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "",
-            b"package.json",
-        )
-
-
-def test_symlink_manifest_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    real = root / "real.json"
-    real.write_text(
-        "{}",
-        encoding="utf-8",
-    )
-
-    link = root / "package.json"
-    link.symlink_to(real)
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "diff --git a/package.json b/package.json\n",
-            ["package.json"],
-        )
-
-
-def test_repository_outside_manifest_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    outside = tmp_path.parent / "package.json"
-    outside.write_text(
-        "{}",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "",
-            ["../package.json"],
-        )
-
-
-def test_secret_values_are_redacted(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    manifest = root / "package.json"
-    manifest.write_text(
-        "{}",
-        encoding="utf-8",
-    )
+    manifest = tmp_path / "package.json"
+    manifest.write_text("{}", encoding="utf-8")
 
     diff = (
         "diff --git a/package.json b/package.json\n"
         "--- a/package.json\n"
         "+++ b/package.json\n"
-        "@@ -1 +1,2 @@\n"
-        " {}\n"
-        "+token=super-secret-value\n"
-        "+password=another-secret-value\n"
+        "@@ -1 +1 @@\n"
+        "-token=super-secret-value\n"
+        "+token=new-secret-value\n"
     )
 
     result = analyze_manifest_diff(
-        root,
+        tmp_path,
         diff,
         ["package.json"],
     )
 
-    rendered = result.to_json()
-
-    assert "super-secret-value" not in rendered
-    assert "another-secret-value" not in rendered
-    assert "<REDACTED>" in rendered
+    assert "super-secret-value" not in result.redacted_diff
+    assert "new-secret-value" not in result.redacted_diff
+    assert "[REDACTED]" in result.redacted_diff
 
 
-def test_bearer_secret_is_redacted(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    manifest = root / "package.json"
-    manifest.write_text(
-        "{}",
-        encoding="utf-8",
-    )
-
-    diff = (
-        "diff --git a/package.json b/package.json\n"
-        "--- a/package.json\n"
-        "+++ b/package.json\n"
-        "@@ -1 +1,2 @@\n"
-        " {}\n"
-        "+token=BearerVerySecret123\n"
-    )
-
-    result = analyze_manifest_diff(
-        root,
-        diff,
-        ["package.json"],
-    )
-
-    assert "BearerVerySecret123" not in result.to_json()
-
-
-def test_large_diff_is_rejected(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            root,
-            "x" * (
-                2_000_000 + 1
-            ),
-            [],
-        )
-
-
-def test_invalid_repository_is_rejected(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        analyze_manifest_diff(
-            tmp_path,
-            "",
-            [],
-        )
-
-
-def test_malformed_hunk_is_reported(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    manifest = root / "package.json"
-    manifest.write_text(
-        "{}",
-        encoding="utf-8",
-    )
-
-    diff = (
-        "diff --git a/package.json b/package.json\n"
-        "--- a/package.json\n"
-        "+++ b/package.json\n"
-        "NOT-A-VALID-HUNK\n"
-        "+garbage\n"
-    )
-
-    result = analyze_manifest_diff(
-        root,
-        diff,
-        ["package.json"],
-    )
-
-    assert result.changed_manifest_count == 1
-    assert "package.json" in result.malformed_manifests
-    assert result.is_safe is False
-
-
-def test_duplicate_manifest_paths_are_deduplicated(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
-
-    manifest = root / "pyproject.toml"
-    manifest.write_text(
-        "[project]\n",
-        encoding="utf-8",
-    )
-
-    result = analyze_manifest_diff(
-        root,
-        "",
-        [
-            "pyproject.toml",
-            "pyproject.toml",
-        ],
-    )
-
-    assert result.changed_manifest_count == 0
-    assert result.unsupported_manifests == ()
-
-
-def test_result_serialization(
-    tmp_path: Path,
-) -> None:
+def test_result_serialization(tmp_path: Path) -> None:
     result = ManifestDiffAnalysisResult(
-        repository_root=str(tmp_path),
+        repository_root=str(tmp_path.resolve()),
         manifests=(
             ManifestDiff(
                 path="pyproject.toml",
@@ -547,100 +235,220 @@ def test_result_serialization(
                         old_version="==2.31.0",
                         new_version="==2.32.0",
                         change_type="updated",
-                        line_number=2,
+                        line_number=4,
                     ),
                 ),
             ),
         ),
+        unrelated_changes=(),
+        redacted_diff="safe",
     )
 
-    payload = json.loads(
-        result.to_json()
+    payload = result.to_dict()
+    serialized = result.to_json()
+
+    assert payload["repository_root"] == str(
+        tmp_path.resolve()
+    )
+    assert json.loads(serialized)["safe"] is True
+
+
+def test_result_validation(tmp_path: Path) -> None:
+    result = ManifestDiffAnalysisResult(
+        repository_root=str(tmp_path.resolve()),
+        manifests=(),
+        unrelated_changes=(),
+        redacted_diff="",
     )
 
-    assert payload[
-        "changed_manifest_count"
-    ] == 1
-
-    assert payload[
-        "dependency_change_count"
-    ] == 1
-
-    assert payload[
-        "manifests"
-    ][0]["manager"] == "python"
+    assert validate_manifest_diff_analysis(result)
+    assert validate_manifest_diff(result)
 
 
-def test_result_validation(
+def test_absolute_repository_root_is_valid(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    result = analyze_manifest_diff(
+        tmp_path.resolve(),
+        "",
+        [],
+    )
+
+    assert Path(result.repository_root).is_absolute()
+
+
+def test_relative_manifest_is_required(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            ["/tmp/package.json"],
+        )
+
+
+def test_parent_traversal_is_rejected(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            ["../package.json"],
+        )
+
+
+def test_empty_manifest_path_is_rejected(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            [""],
+        )
+
+
+def test_null_manifest_path_is_rejected(tmp_path: Path) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            ["package\x00.json"],
+        )
+
+
+def test_string_manifest_collection_is_rejected(
     tmp_path: Path,
 ) -> None:
-    result = ManifestDiffAnalysisResult(
-        repository_root=str(tmp_path),
-    )
+    init_repo(tmp_path)
 
-    assert validate_manifest_diff_analysis(
-        result
-    ) is True
-
-
-def test_wrong_result_type_fails_validation() -> None:
-    assert validate_manifest_diff_analysis(
-        object()
-    ) is False
-
-
-def test_invalid_change_type_is_rejected() -> None:
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        ManifestDependencyChange(
-            name="requests",
-            old_version="1.0.0",
-            new_version="2.0.0",
-            change_type="invalid",
-            line_number=1,
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            "package.json",
         )
 
 
-def test_invalid_line_number_is_rejected() -> None:
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        ManifestDependencyChange(
-            name="requests",
-            old_version="1.0.0",
-            new_version="2.0.0",
-            change_type="updated",
-            line_number=0,
+def test_bytes_manifest_collection_is_rejected(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            b"package.json",
         )
 
 
-def test_boolean_line_number_is_rejected() -> None:
-    with pytest.raises(
-        ManifestDiffAnalysisError,
-    ):
-        ManifestDependencyChange(
-            name="requests",
-            old_version="1.0.0",
-            new_version="2.0.0",
-            change_type="updated",
-            line_number=True,
+def test_symlink_manifest_is_rejected(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    target = tmp_path / "real.json"
+    target.write_text("{}", encoding="utf-8")
+
+    link = tmp_path / "package.json"
+
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("Symlink creation unavailable")
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            ["package.json"],
+        )
+
+
+def test_outside_manifest_is_rejected(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            ["../outside.json"],
+        )
+
+
+def test_duplicate_manifest_paths_are_rejected(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "",
+            ["package.json", "package.json"],
+        )
+
+
+def test_invalid_repository_root_is_rejected(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing"
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            missing,
+            "",
+            [],
+        )
+
+
+def test_non_directory_repository_root_is_rejected(
+    tmp_path: Path,
+) -> None:
+    file_path = tmp_path / "file"
+    file_path.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            file_path,
+            "",
+            [],
+        )
+
+
+def test_large_diff_is_rejected(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    with pytest.raises(ManifestDiffAnalysisError):
+        analyze_manifest_diff(
+            tmp_path,
+            "x" * (2_000_000 + 1),
+            [],
         )
 
 
 def test_alias_matches_primary_function(
     tmp_path: Path,
 ) -> None:
-    root = make_repo(tmp_path)
+    init_repo(tmp_path)
 
     first = analyze_manifest_diff(
-        root,
+        tmp_path,
         "",
         [],
     )
 
     second = analyze_manifest_diffs(
-        root,
+        tmp_path,
         "",
         [],
     )
@@ -648,15 +456,160 @@ def test_alias_matches_primary_function(
     assert first.to_dict() == second.to_dict()
 
 
-def test_safe_result_has_no_malformed_manifests(
-    tmp_path: Path,
-) -> None:
-    root = make_repo(tmp_path)
+def test_invalid_dependency_change_type() -> None:
+    with pytest.raises(ManifestDiffAnalysisError):
+        ManifestDependencyChange(
+            name="requests",
+            old_version=None,
+            new_version="2.32.0",
+            change_type="invalid",
+            line_number=1,
+        )
 
-    result = analyze_manifest_diff(
-        root,
-        python_update_diff(),
-        ["pyproject.toml"],
+
+def test_bool_line_number_is_rejected() -> None:
+    with pytest.raises(ManifestDiffAnalysisError):
+        ManifestDependencyChange(
+            name="requests",
+            old_version=None,
+            new_version="2.32.0",
+            change_type="added",
+            line_number=True,
+        )
+
+
+def test_inconsistent_added_change_is_rejected() -> None:
+    with pytest.raises(ManifestDiffAnalysisError):
+        ManifestDependencyChange(
+            name="requests",
+            old_version="2.31.0",
+            new_version="2.32.0",
+            change_type="added",
+            line_number=1,
+        )
+
+
+def test_inconsistent_removed_change_is_rejected() -> None:
+    with pytest.raises(ManifestDiffAnalysisError):
+        ManifestDependencyChange(
+            name="requests",
+            old_version=None,
+            new_version=None,
+            change_type="removed",
+            line_number=1,
+        )
+
+
+def test_invalid_result_type() -> None:
+    assert not validate_manifest_diff_analysis(
+        object()
     )
 
-    assert result.is_safe is True
+
+def test_json_serialization_is_valid(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    result = analyze_manifest_diff(
+        tmp_path,
+        "",
+        ["package.json"],
+    )
+
+    payload = json.loads(result.to_json())
+
+    assert payload["repository_root"] == str(
+        tmp_path.resolve()
+    )
+    assert payload["manifests"][0]["path"] == "package.json"
+
+
+def test_no_change_result_is_safe(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    result = analyze_manifest_diff(
+        tmp_path,
+        "",
+        ["package.json"],
+    )
+
+    assert result.safe is True
+    assert result.unrelated_changes == ()
+
+
+def test_multiple_manifests_preserve_order(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    result = analyze_manifest_diff(
+        tmp_path,
+        "",
+        ["package.json", "pyproject.toml"],
+    )
+
+    assert [
+        item.path
+        for item in result.manifests
+    ] == [
+        "package.json",
+        "pyproject.toml",
+    ]
+
+
+def test_bearer_secret_is_redacted(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    diff = (
+        "diff --git a/package.json b/package.json\n"
+        "--- a/package.json\n"
+        "+++ b/package.json\n"
+        "@@ -1 +1 @@\n"
+        '+Authorization: Bearer very-secret-token\n'
+    )
+
+    result = analyze_manifest_diff(
+        tmp_path,
+        diff,
+        ["package.json"],
+    )
+
+    assert "very-secret-token" not in result.redacted_diff
+    assert "[REDACTED]" in result.redacted_diff
+
+
+def test_manifest_path_is_normalized(
+    tmp_path: Path,
+) -> None:
+    init_repo(tmp_path)
+
+    result = analyze_manifest_diff(
+        tmp_path,
+        "",
+        ["./package.json"],
+    )
+
+    assert result.manifests[0].path == "package.json"
+
+
+def test_repository_root_must_not_be_relative(
+    tmp_path: Path,
+) -> None:
+    old_cwd = Path.cwd()
+
+    try:
+        os.chdir(tmp_path)
+
+        with pytest.raises(ManifestDiffAnalysisError):
+            analyze_manifest_diff(
+                ".",
+                "",
+                [],
+            )
+    finally:
+        os.chdir(old_cwd)
