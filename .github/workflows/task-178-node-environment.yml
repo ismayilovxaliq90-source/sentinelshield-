@@ -23,32 +23,57 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Setup Node.js 24
+      # Python is required only to run the SentinelShield
+      # validation/test code on the GitHub runner.
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # Node is installed and executed ONLY on GitHub runner.
+      - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: '24'
 
+      # Install pytest ONLY on the GitHub runner.
+      - name: Install test dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      # ======================================================
+      # TASK 178 REAL EXECUTION
+      # ======================================================
       - name: Validate Node environment
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "=== TASK 178 — SERVER EXECUTION ==="
+
+          echo "Node:"
           node --version
+
+          echo "npm:"
           npm --version
 
-          PYTHON_BIN="python3"
+          echo "Node executable:"
+          command -v node
 
-          if [ ! -x "$(command -v "$PYTHON_BIN")" ]; then
-            echo "FAIL: python3 is not available on GitHub runner"
-            exit 1
-          fi
-
-          "$PYTHON_BIN" --version
+          echo "npm executable:"
+          command -v npm
 
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
-          "$PYTHON_BIN" scripts/task_178_validate_node_environment.py
+          python scripts/task_178_validate_node_environment.py
 
+      # ======================================================
+      # TASK 178 UNIT TESTS
+      # ======================================================
       - name: Run Task 178 unit tests
         shell: bash
         run: |
@@ -56,26 +81,36 @@ jobs:
 
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
-          "$HOME/.local/bin/pytest" \
+          python -m pytest \
             tests/test_node_environment_validation.py \
             -q
 
-      - name: Upload Task 178 evidence
+      # ======================================================
+      # EVIDENCE
+      # ======================================================
+      - name: Generate Task 178 evidence
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p artifacts/task-178
 
           {
             echo "TASK=178"
             echo "NAME=Node Environment Validation"
-            echo "RUNNER=$RUNNER_OS"
-            echo "NODE=$(node --version)"
-            echo "NPM=$(npm --version)"
-            echo "STATUS=$([[ '${{ job.status }}' == 'success' ]] && echo PASS || echo FAIL)"
+            echo "EXECUTION_ENVIRONMENT=GitHub Actions"
+            echo "RUNNER_OS=$RUNNER_OS"
+            echo "NODE_VERSION=$(node --version)"
+            echo "NPM_VERSION=$(npm --version)"
+            echo "NODE_PATH=$(command -v node)"
+            echo "NPM_PATH=$(command -v npm)"
+            echo "JOB_STATUS=${{ job.status }}"
           } > artifacts/task-178/execution-evidence.txt
 
-      - name: Publish Task 178 evidence
+          cat artifacts/task-178/execution-evidence.txt
+
+      - name: Upload Task 178 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
