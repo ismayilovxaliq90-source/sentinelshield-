@@ -1,18 +1,24 @@
 name: TASK 206 - Dependency Version Verification
 
 on:
-  workflow_dispatch:
   push:
     paths:
       - "src/sentinelshield/dependency_version_verification.py"
       - "tests/test_dependency_version_verification.py"
       - ".github/workflows/task-206-dependency-version-verification.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/dependency_version_verification.py"
+      - "tests/test_dependency_version_verification.py"
+      - ".github/workflows/task-206-dependency-version-verification.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   task-206:
+    name: Validate TASK 206
     runs-on: ubuntu-latest
 
     env:
@@ -21,92 +27,112 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
 
-      - name: Install pytest
+      - name: Install test dependency
         run: |
-          python -m pip install --disable-pip-version-check pytest
+          python -m pip install --upgrade pip
+          python -m pip install pytest
 
-      - name: Verify module import
+      - name: Verify source import path
         run: |
-          python -c "import sentinelshield.dependency_version_verification"
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
+          import os
+          import sys
 
-      - name: Run TASK 206 tests
-        run: |
-          python -m pytest -q tests/test_dependency_version_verification.py
+          expected = os.path.join(
+              os.environ["GITHUB_WORKSPACE"],
+              "src",
+          )
 
-      - name: Run isolated live validation
+          assert expected in sys.path, (
+              f"src path missing from sys.path: {expected}"
+          )
+
+          import sentinelshield
+          from sentinelshield.dependency_version_verification import (
+              verify_dependency_versions,
+          )
+
+          print("TASK 206 import check: PASS")
+          print(f"PYTHONPATH={os.environ.get('PYTHONPATH')}")
+          print(f"sentinelshield={sentinelshield.__file__}")
+          print(f"verify_dependency_versions={verify_dependency_versions}")
+
+      - name: Run TASK 206 unit tests
         run: |
-          python - <<'PY'
-          from pathlib import Path
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+            tests/test_dependency_version_verification.py \
+            -q
+
+      - name: Run live TASK 206 validation
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
           import tempfile
+          from pathlib import Path
 
           from sentinelshield.dependency_version_verification import (
               DependencyVersionVerificationRequest,
               ExpectedDependencyVersion,
               ResolvedDependencyVersion,
+              validate_verification_result,
               verify_dependency_versions,
           )
 
-          with tempfile.TemporaryDirectory() as temporary:
-              root = Path(temporary) / "fixture"
-              root.mkdir()
-              (root / ".git").mkdir()
+          with tempfile.TemporaryDirectory() as directory:
+              root = Path(directory)
+
+              expected = [
+                  ExpectedDependencyVersion("requests", "2.32.4"),
+                  ExpectedDependencyVersion("urllib3", "2.5.0"),
+              ]
+
+              resolved = [
+                  ResolvedDependencyVersion("requests", "2.32.4"),
+                  ResolvedDependencyVersion("urllib3", "2.5.0"),
+              ]
 
               request = DependencyVersionVerificationRequest(
                   repository_root=root,
-                  package_manager="pip",
-                  resolved_dependencies=(
-                      ResolvedDependencyVersion(
-                          "requests",
-                          "2.32.0",
-                      ),
-                      ResolvedDependencyVersion(
-                          "urllib3",
-                          "2.2.2",
-                      ),
-                  ),
-                  expected_dependencies=(
-                      ExpectedDependencyVersion(
-                          "requests",
-                          "2.32.0",
-                      ),
-                      ExpectedDependencyVersion(
-                          "urllib3",
-                          "2.2.2",
-                      ),
-                  ),
+                  expected=expected,
+                  resolved=resolved,
               )
 
               result = verify_dependency_versions(request)
 
               assert result.valid is True
-              assert result.reason == "DEPENDENCY_VERSIONS_VERIFIED"
-              assert result.missing == ()
-              assert result.mismatches == ()
-              assert result.unexpected == ()
-              assert result.duplicates == ()
+              assert validate_verification_result(result) is True
+              assert result.missing == []
+              assert result.unexpected == []
+              assert result.mismatches == []
+              assert result.duplicates == []
+              assert result.errors == []
 
               print("TASK 206 LIVE VALIDATION: PASS")
-          PY
+              print(result.to_json())
 
-      - name: Verify repository diff formatting
+      - name: Detect Python bytecode changes
         run: |
-          git diff --check
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
-      - name: Verify no changed bytecode
-        run: |
-          if git status --porcelain | grep -E '(^|/)(__pycache__/|.*\.pyc$)'; then
-            echo "TASK 206 FAIL: bytecode changes detected"
+          if git status --short --untracked-files=all | grep -E '(^|/)(__pycache__/|.*\.pyc$)'; then
+            echo "TASK 206 FAIL: Python bytecode changes detected"
             exit 1
           fi
 
-      - name: TASK 206 PASS
+          echo "TASK 206 bytecode check: PASS"
+
+      - name: Final TASK 206 status
         run: |
-          echo "TASK 206 PASS: dependency version verification completed on GitHub runner"
+          echo "TASK 206 GitHub validation completed."
