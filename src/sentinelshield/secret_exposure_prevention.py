@@ -1,529 +1,326 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
-import re
+from typing import Iterable, Mapping, Sequence
 
 
-class SecretExposurePreventionError(ValueError):
-    """Raised when secret-exposure validation cannot be completed safely."""
+class SecretExposureError(ValueError):
+    """Raised when secret-exposure validation cannot be performed safely."""
+
+
+_SECRET_NAME_MARKERS = (
+    "PASSWORD",
+    "PASSWD",
+    "SECRET",
+    "TOKEN",
+    "API_KEY",
+    "APIKEY",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "CREDENTIAL",
+    "CREDENTIALS",
+    "AUTH",
+    "ACCESS_KEY",
+    "ACCESSKEY",
+)
+
+_REDACTED = "[REDACTED]"
 
 
 @dataclass(frozen=True)
 class SecretExposurePolicy:
-    """
-    Policy controlling detection and masking of secret material.
-
-    Secret names are matched case-insensitively.
-    Explicit secret values are also detected when supplied.
-    """
-
-    secret_names: frozenset[str] = field(default_factory=frozenset)
-
-    secret_name_patterns: tuple[str, ...] = (
-        "PASSWORD",
-        "PASSWD",
-        "SECRET",
-        "TOKEN",
-        "API_KEY",
-        "APIKEY",
-        "PRIVATE_KEY",
-        "PRIVATEKEY",
-        "CREDENTIAL",
-        "CREDENTIALS",
-        "AUTH",
-        "ACCESS_KEY",
-        "ACCESSKEY",
-    )
-
-    mask: str = "***REDACTED***"
-    minimum_secret_length: int = 4
+    reject_secret_named_environment: bool = True
     reject_control_characters: bool = True
+    max_command_argument_length: int = 4096
+    max_environment_name_length: int = 256
+    max_environment_value_length: int = 8192
+    redaction_marker: str = _REDACTED
 
+    def __post_init__(self) -> None:
+        if isinstance(self.max_command_argument_length, bool):
+            raise TypeError("max_command_argument_length must be an integer")
 
-@dataclass(frozen=True)
-class SecretExposure:
-    """One detected secret exposure."""
+        if isinstance(self.max_environment_name_length, bool):
+            raise TypeError("max_environment_name_length must be an integer")
 
-    location: str
-    reason: str
-    secret_name: str | None = None
+        if isinstance(self.max_environment_value_length, bool):
+            raise TypeError("max_environment_value_length must be an integer")
 
-    def to_dict(self) -> dict[str, str | None]:
-        return {
-            "location": self.location,
-            "reason": self.reason,
-            "secret_name": self.secret_name,
-        }
+        if not isinstance(self.max_command_argument_length, int):
+            raise TypeError("max_command_argument_length must be an integer")
+
+        if not isinstance(self.max_environment_name_length, int):
+            raise TypeError("max_environment_name_length must be an integer")
+
+        if not isinstance(self.max_environment_value_length, int):
+            raise TypeError("max_environment_value_length must be an integer")
+
+        if self.max_command_argument_length <= 0:
+            raise ValueError("max_command_argument_length must be positive")
+
+        if self.max_environment_name_length <= 0:
+            raise ValueError("max_environment_name_length must be positive")
+
+        if self.max_environment_value_length <= 0:
+            raise ValueError("max_environment_value_length must be positive")
+
+        if not isinstance(self.redaction_marker, str):
+            raise TypeError("redaction_marker must be a string")
+
+        if not self.redaction_marker:
+            raise ValueError("redaction_marker must not be empty")
+
+        if any(
+            ord(char) < 32 or ord(char) == 127
+            for char in self.redaction_marker
+        ):
+            raise ValueError("redaction_marker contains control characters")
 
 
 @dataclass(frozen=True)
 class SecretExposureResult:
-    """Immutable secret-exposure validation result."""
-
     safe: bool
-    exposures: tuple[SecretExposure, ...]
-    redacted: Any
+    failures: tuple[str, ...]
+    redacted_command: tuple[str, ...]
+    redacted_environment: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "redacted_command",
+            tuple(self.redacted_command),
+        )
+        object.__setattr__(
+            self,
+            "redacted_environment",
+            MappingProxyType(dict(self.redacted_environment)),
+        )
 
     @property
-    def valid(self) -> bool:
-        return self.safe
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "safe": self.safe,
-            "valid": self.valid,
-            "exposures": [
-                exposure.to_dict()
-                for exposure in self.exposures
-            ],
-            "redacted": self.redacted,
-        }
+    def exposed(self) -> bool:
+        return not self.safe
 
 
-def _validate_policy(
-    policy: SecretExposurePolicy,
-) -> None:
-    if not isinstance(policy, SecretExposurePolicy):
-        raise SecretExposurePreventionError(
-            "INVALID_POLICY"
-        )
-
-    if not isinstance(policy.mask, str) or not policy.mask:
-        raise SecretExposurePreventionError(
-            "INVALID_MASK"
-        )
-
-    if policy.minimum_secret_length < 1:
-        raise SecretExposurePreventionError(
-            "INVALID_MINIMUM_SECRET_LENGTH"
-        )
-
-    if policy.reject_control_characters:
-        if any(
-            ord(char) < 32 and char not in "\t"
-            for char in policy.mask
-        ):
-            raise SecretExposurePreventionError(
-                "CONTROL_CHARACTER_IN_MASK"
-            )
-
-
-def _is_secret_name(
-    name: str,
-    policy: SecretExposurePolicy,
-) -> bool:
-    upper_name = name.upper()
-
-    explicit_names = {
-        item.upper()
-        for item in policy.secret_names
-        if isinstance(item, str)
-    }
-
-    if upper_name in explicit_names:
-        return True
-
-    return any(
-        pattern.upper() in upper_name
-        for pattern in policy.secret_name_patterns
-    )
-
-
-def _contains_control_characters(value: str) -> bool:
-    return bool(
-        re.search(
-            r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]",
-            value,
-        )
-    )
-
-
-def _mask_string(
+def _validate_text(
     value: str,
-    secrets: tuple[str, ...],
-    policy: SecretExposurePolicy,
-) -> tuple[str, bool]:
-    result = value
-    exposed = False
+    *,
+    field: str,
+    reject_control_characters: bool,
+) -> list[str]:
+    failures: list[str] = []
 
-    for secret in secrets:
-        if not isinstance(secret, str):
-            continue
+    if reject_control_characters:
+        for char in value:
+            code = ord(char)
 
-        if len(secret) < policy.minimum_secret_length:
-            continue
+            if code == 0:
+                failures.append(f"{field}:NULL_CHARACTER")
+                break
 
-        if secret and secret in result:
-            result = result.replace(secret, policy.mask)
-            exposed = True
+            if code < 32 or code == 127:
+                failures.append(f"{field}:CONTROL_CHARACTER")
+                break
 
-    return result, exposed
+    return failures
 
 
-def _collect_secret_values(
-    environment: Mapping[str, Any] | None,
-    policy: SecretExposurePolicy,
-) -> tuple[tuple[str, str], tuple[str, ...]]:
-    """
-    Return:
-      1. secret-name/value pairs
-      2. secret values suitable for masking
+def _is_secret_name(name: str) -> bool:
+    normalized = name.upper()
 
-    Values are retained only inside this function and never returned
-    in exposure diagnostics.
-    """
+    return any(marker in normalized for marker in _SECRET_NAME_MARKERS)
 
-    if environment is None:
-        return (), ()
 
-    pairs: list[tuple[str, str]] = []
+def _safe_secret_values(
+    secret_values: Iterable[str] | None,
+) -> tuple[str, ...]:
+    if secret_values is None:
+        return ()
+
+    if isinstance(secret_values, (str, bytes)):
+        raise TypeError("secret_values must be an iterable of strings")
+
     values: list[str] = []
 
-    for name, value in environment.items():
-        if not isinstance(name, str):
-            continue
+    for value in secret_values:
+        if not isinstance(value, str):
+            raise TypeError("every secret value must be a string")
 
-        if _is_secret_name(name, policy):
-            if isinstance(value, str) and value:
-                pairs.append((name, value))
-                values.append(value)
+        if value:
+            values.append(value)
 
-    for name in policy.secret_names:
-        if not isinstance(name, str):
-            continue
-
-        if name in environment:
-            value = environment[name]
-            if isinstance(value, str) and value:
-                if (name, value) not in pairs:
-                    pairs.append((name, value))
-                values.append(value)
-
-    unique_values = tuple(
-        sorted(
-            set(values),
-            key=lambda item: (-len(item), item),
-        )
-    )
-
-    return tuple(pairs), unique_values
+    return tuple(dict.fromkeys(values))
 
 
-def _redact_value(
-    value: Any,
-    secrets: tuple[str, ...],
-    policy: SecretExposurePolicy,
-    location: str,
-    exposures: list[SecretExposure],
-) -> Any:
-    if isinstance(value, str):
-        redacted, exposed = _mask_string(
-            value,
-            secrets,
-            policy,
-        )
+def _redact_text(
+    value: str,
+    secret_values: tuple[str, ...],
+    marker: str,
+) -> str:
+    result = value
 
-        if exposed:
-            exposures.append(
-                SecretExposure(
-                    location=location,
-                    reason="SECRET_VALUE_EXPOSURE",
-                )
-            )
+    for secret in sorted(secret_values, key=len, reverse=True):
+        result = result.replace(secret, marker)
 
-        return redacted
-
-    if isinstance(value, Mapping):
-        redacted_mapping: dict[Any, Any] = {}
-
-        for key, item in value.items():
-            key_location = (
-                f"{location}.{key}"
-                if location
-                else str(key)
-            )
-
-            if isinstance(key, str) and _is_secret_name(
-                key,
-                policy,
-            ):
-                exposures.append(
-                    SecretExposure(
-                        location=key_location,
-                        reason="SECRET_NAME_EXPOSURE",
-                        secret_name=key,
-                    )
-                )
-
-                redacted_mapping[key] = policy.mask
-                continue
-
-            redacted_mapping[key] = _redact_value(
-                item,
-                secrets,
-                policy,
-                key_location,
-                exposures,
-            )
-
-        return MappingProxyType(redacted_mapping)
-
-    if isinstance(value, (list, tuple)):
-        items = []
-
-        for index, item in enumerate(value):
-            item_location = (
-                f"{location}[{index}]"
-                if location
-                else f"[{index}]"
-            )
-
-            items.append(
-                _redact_value(
-                    item,
-                    secrets,
-                    policy,
-                    item_location,
-                    exposures,
-                )
-            )
-
-        return tuple(items) if isinstance(value, tuple) else tuple(items)
-
-    if isinstance(value, set):
-        return frozenset(
-            _redact_value(
-                item,
-                secrets,
-                policy,
-                f"{location}[]",
-                exposures,
-            )
-            for item in value
-        )
-
-    return value
+    return result
 
 
-def inspect_secret_exposure(
-    value: Any,
+def validate_secret_exposure(
+    command: Sequence[str],
+    environment: Mapping[str, str],
     *,
-    environment: Mapping[str, Any] | None = None,
+    secret_values: Iterable[str] | None = None,
     policy: SecretExposurePolicy | None = None,
-    location: str = "value",
 ) -> SecretExposureResult:
     """
-    Inspect arbitrary data for secret exposure.
+    Validate that command arguments and environment cannot expose secrets.
 
-    This function performs no command execution, filesystem modification,
-    package installation, network access, or environment mutation.
+    This function performs validation only. It never executes a command and
+    never mutates the supplied command or environment.
     """
 
     if policy is None:
         policy = SecretExposurePolicy()
 
-    _validate_policy(policy)
+    if isinstance(command, (str, bytes)):
+        raise TypeError("command must be a sequence of string arguments")
 
-    exposures: list[SecretExposure] = []
+    if not isinstance(environment, Mapping):
+        raise TypeError("environment must be a mapping")
 
-    _, environment_secret_values = _collect_secret_values(
-        environment,
-        policy,
-    )
+    secret_values_tuple = _safe_secret_values(secret_values)
 
-    redacted_environment = _redact_value(
-        environment if environment is not None else {},
-        environment_secret_values,
-        policy,
-        "environment",
-        exposures,
-    )
+    failures: list[str] = []
+    redacted_command: list[str] = []
 
-    all_secret_values = list(environment_secret_values)
+    for index, argument in enumerate(command):
+        if not isinstance(argument, str):
+            raise TypeError("every command argument must be a string")
 
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if (
-                isinstance(key, str)
-                and _is_secret_name(key, policy)
-                and isinstance(item, str)
-                and item
-            ):
-                all_secret_values.append(item)
+        if len(argument) > policy.max_command_argument_length:
+            failures.append(
+                f"COMMAND_ARGUMENT_TOO_LONG:{index}"
+            )
 
-    unique_secrets = tuple(
-        sorted(
-            set(all_secret_values),
-            key=lambda item: (-len(item), item),
+        failures.extend(
+            _validate_text(
+                argument,
+                field=f"COMMAND_ARGUMENT:{index}",
+                reject_control_characters=policy.reject_control_characters,
+            )
         )
-    )
 
-    redacted_value = _redact_value(
-        value,
-        unique_secrets,
-        policy,
-        location,
-        exposures,
-    )
+        if any(secret and secret in argument for secret in secret_values_tuple):
+            failures.append(
+                f"SECRET_EXPOSED_IN_COMMAND:{index}"
+            )
 
-    if environment is not None:
-        for name, secret_value in _collect_secret_values(
-            environment,
-            policy,
-        )[0]:
-            if secret_value:
-                exposures.append(
-                    SecretExposure(
-                        location=f"environment.{name}",
-                        reason="SECRET_VALUE_PRESENT",
-                        secret_name=name,
-                    )
+        redacted_command.append(
+            _redact_text(
+                argument,
+                secret_values_tuple,
+                policy.redaction_marker,
+            )
+        )
+
+    redacted_environment: dict[str, str] = {}
+
+    for name, value in environment.items():
+        if not isinstance(name, str):
+            raise TypeError("environment variable names must be strings")
+
+        if not isinstance(value, str):
+            raise TypeError("environment variable values must be strings")
+
+        if len(name) > policy.max_environment_name_length:
+            failures.append(
+                f"ENVIRONMENT_NAME_TOO_LONG:{name}"
+            )
+
+        if len(value) > policy.max_environment_value_length:
+            failures.append(
+                f"ENVIRONMENT_VALUE_TOO_LONG:{name}"
+            )
+
+        failures.extend(
+            _validate_text(
+                name,
+                field=f"ENVIRONMENT_NAME:{name}",
+                reject_control_characters=policy.reject_control_characters,
+            )
+        )
+
+        failures.extend(
+            _validate_text(
+                value,
+                field=f"ENVIRONMENT_VALUE:{name}",
+                reject_control_characters=policy.reject_control_characters,
+            )
+        )
+
+        if (
+            policy.reject_secret_named_environment
+            and _is_secret_name(name)
+        ):
+            if value:
+                failures.append(
+                    f"SECRET_NAMED_ENVIRONMENT:{name}"
                 )
 
-    # Deduplicate exposure records while preserving order.
-    unique_exposures: list[SecretExposure] = []
-    seen: set[tuple[str, str, str | None]] = set()
+        if any(secret and secret in value for secret in secret_values_tuple):
+            failures.append(
+                f"SECRET_EXPOSED_IN_ENVIRONMENT:{name}"
+            )
 
-    for exposure in exposures:
-        key = (
-            exposure.location,
-            exposure.reason,
-            exposure.secret_name,
+        redacted_environment[name] = _redact_text(
+            value,
+            secret_values_tuple,
+            policy.redaction_marker,
         )
 
-        if key not in seen:
-            seen.add(key)
-            unique_exposures.append(exposure)
-
-    # Redact the environment separately so its secret values can never
-    # survive inside the returned object.
-    if environment is not None:
-        redacted_environment = _redact_value(
-            environment,
-            unique_secrets,
-            policy,
-            "environment",
-            [],
-        )
-
-    combined = {
-        "value": redacted_value,
-        "environment": redacted_environment,
-    }
+    unique_failures = tuple(dict.fromkeys(failures))
 
     return SecretExposureResult(
-        safe=not unique_exposures,
-        exposures=tuple(unique_exposures),
-        redacted=MappingProxyType(combined),
+        safe=not unique_failures,
+        failures=unique_failures,
+        redacted_command=tuple(redacted_command),
+        redacted_environment=redacted_environment,
     )
 
 
-def validate_secret_exposure(
-    value: Any,
+def validate_secret_exposure_vector(
+    command: Sequence[str],
+    environment: Mapping[str, str],
     *,
-    environment: Mapping[str, Any] | None = None,
+    secret_values: Iterable[str] | None = None,
     policy: SecretExposurePolicy | None = None,
-    location: str = "value",
 ) -> SecretExposureResult:
-    """Compatibility alias for the primary inspection API."""
-
-    return inspect_secret_exposure(
-        value,
-        environment=environment,
-        policy=policy,
-        location=location,
-    )
-
-
-def redact_secrets(
-    value: Any,
-    *,
-    environment: Mapping[str, Any] | None = None,
-    policy: SecretExposurePolicy | None = None,
-) -> Any:
-    """
-    Return a redacted representation.
-
-    Raises SecretExposurePreventionError for invalid policy.
-    """
-
-    result = inspect_secret_exposure(
-        value,
-        environment=environment,
+    return validate_secret_exposure(
+        command,
+        environment,
+        secret_values=secret_values,
         policy=policy,
     )
-
-    return result.redacted
 
 
 def require_no_secret_exposure(
-    value: Any,
+    command: Sequence[str],
+    environment: Mapping[str, str],
     *,
-    environment: Mapping[str, Any] | None = None,
+    secret_values: Iterable[str] | None = None,
     policy: SecretExposurePolicy | None = None,
-    location: str = "value",
-) -> Any:
-    """
-    Require a safe value.
-
-    The raised error contains only non-secret exposure metadata.
-    Secret values are never included in the exception text.
-    """
-
-    result = inspect_secret_exposure(
-        value,
-        environment=environment,
+) -> SecretExposureResult:
+    result = validate_secret_exposure(
+        command,
+        environment,
+        secret_values=secret_values,
         policy=policy,
-        location=location,
     )
 
     if not result.safe:
-        reasons = sorted(
-            {
-                exposure.reason
-                for exposure in result.exposures
-            }
+        raise SecretExposureError(
+            "Secret exposure validation failed: "
+            + ", ".join(result.failures)
         )
 
-        locations = sorted(
-            {
-                exposure.location
-                for exposure in result.exposures
-            }
-        )
-
-        raise SecretExposurePreventionError(
-            "SECRET_EXPOSURE_DETECTED:"
-            + ",".join(reasons)
-            + ":"
-            + ",".join(locations)
-        )
-
-    return result.redacted
-
-
-def validate_command_secret_exposure(
-    command: list[str] | tuple[str, ...],
-    *,
-    environment: Mapping[str, Any] | None = None,
-    policy: SecretExposurePolicy | None = None,
-) -> SecretExposureResult:
-    """
-    Inspect command arguments and environment for secret exposure.
-
-    The command is inspected as data only; it is never executed.
-    """
-
-    if not isinstance(command, (list, tuple)):
-        raise SecretExposurePreventionError(
-            "COMMAND_MUST_BE_SEQUENCE"
-        )
-
-    return inspect_secret_exposure(
-        tuple(command),
-        environment=environment,
-        policy=policy,
-        location="command",
-    )
+    return result
