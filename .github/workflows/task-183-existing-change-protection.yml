@@ -1,57 +1,48 @@
-name: Task 183 Server Validation
+name: TASK 183 - Existing Change Protection
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - "**"
-  pull_request:
-
-permissions:
-  contents: read
+    paths:
+      - "src/sentinelshield/existing_change_protection.py"
+      - "tests/test_existing_change_protection.py"
+      - ".github/workflows/task-183-existing-change-protection.yml"
 
 jobs:
   task-183:
-    name: Task 183 Existing Change Protection
     runs-on: ubuntu-latest
 
     env:
-      PYTHONPATH: src
+      PYTHONPATH: ${{ github.workspace }}/src
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.x"
 
       - name: Install pytest
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
+        run: python -m pip install --disable-pip-version-check pytest
 
-      - name: Verify Task 183 source exists
+      - name: Verify module import
         run: |
-          test -f src/sentinelshield/existing_change_protection.py
-          test -f tests/test_existing_change_protection.py
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "from sentinelshield.existing_change_protection import capture_existing_change_protection, validate_existing_change_protection; print('TASK 183 IMPORT PASS')"
 
-      - name: Run Task 183 unit tests
+      - name: Run TASK 183 tests
         run: |
-          PYTHONDONTWRITEBYTECODE=1 \
-          PYTHONPATH=src \
-          python -m pytest \
-            tests/test_existing_change_protection.py \
-            -q
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_existing_change_protection.py
 
-      - name: Task 183 Server Validation
+      - name: Live deletion-protection validation
         run: |
-          PYTHONDONTWRITEBYTECODE=1 \
-          PYTHONPATH=src \
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
           python - <<'PY'
           import subprocess
           import tempfile
@@ -62,120 +53,65 @@ jobs:
               validate_existing_change_protection,
           )
 
-          def run_git(repo: Path, *args: str) -> None:
-              subprocess.run(
-                  ["git", *args],
-                  cwd=repo,
-                  text=True,
-                  capture_output=True,
-                  check=True,
-              )
-
-          with tempfile.TemporaryDirectory() as temp:
-              repo = Path(temp) / "repo"
+          with tempfile.TemporaryDirectory() as temporary:
+              repo = Path(temporary) / "repo"
               repo.mkdir()
 
-              run_git(repo, "init")
+              def git(*args):
+                  subprocess.run(
+                      ("git", *args),
+                      cwd=repo,
+                      check=True,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      text=True,
+                  )
 
-              protected = repo / "user_file.txt"
-              protected.write_text("baseline")
+              git("init")
+              git("config", "user.email", "task183@example.invalid")
+              git("config", "user.name", "Task 183")
 
-              run_git(repo, "add", "user_file.txt")
+              tracked = repo / "tracked.txt"
+              tracked.write_text("original")
 
-              run_git(
-                  repo,
-                  "-c",
-                  "user.name=Task183",
-                  "-c",
-                  "user.email=task183@example.invalid",
-                  "commit",
-                  "-m",
-                  "baseline",
-              )
+              git("add", "tracked.txt")
+              git("commit", "-m", "initial")
 
-              protected.write_text(
-                  "pre-existing user work that must survive"
-              )
+              tracked.write_text("pre-existing user change")
 
               protection = capture_existing_change_protection(repo)
 
-              print("=== TASK 183 — EXISTING CHANGE PROTECTION ===")
-              print(f"capture_valid: {protection.valid}")
-              print(f"protected_change_count: {len(protection.changes)}")
-              print(f"capture_reason: {protection.reason}")
+              tracked.unlink()
 
-              for change in protection.changes:
-                  print(
-                      f"PROTECTED: {change.status!r} "
-                      f"{change.path!r}"
-                  )
+              result = validate_existing_change_protection(protection)
 
-              if not protection.valid:
-                  raise SystemExit(
-                      f"TASK 183 FAIL: {protection.reason}"
-                  )
+              expected = "PROTECTED_CHANGE_MISSING:tracked.txt"
 
-              remediation_file = (
-                  repo / "new_remediation_change.txt"
-              )
-              remediation_file.write_text(
-                  "new remediation work"
-              )
+              if expected not in result.violations:
+                  print("TASK 183 FAIL")
+                  print("violations:", result.violations)
+                  raise SystemExit(1)
 
-              preserved = validate_existing_change_protection(
-                  protection
-              )
+              if result.valid is not True:
+                  print("TASK 183 FAIL: validation engine invalid")
+                  raise SystemExit(1)
 
-              print("--- Preservation test ---")
-              print(f"valid: {preserved.valid}")
-              print(f"protected: {preserved.protected}")
-              print(f"violations: {preserved.violations}")
-              print(f"reason: {preserved.reason}")
+              if result.protected is not False:
+                  print("TASK 183 FAIL: deletion was accepted")
+                  raise SystemExit(1)
 
-              if not preserved.valid or not preserved.protected:
-                  raise SystemExit(
-                      "TASK 183 FAIL: existing change was not preserved"
-                  )
-
-              protected.write_text(
-                  "REMediation incorrectly overwrote protected work"
-              )
-
-              violated = validate_existing_change_protection(
-                  protection
-              )
-
-              print("--- Tamper detection test ---")
-              print(f"valid: {violated.valid}")
-              print(f"protected: {violated.protected}")
-              print(f"violations: {violated.violations}")
-              print(f"reason: {violated.reason}")
-
-              if not violated.valid:
-                  raise SystemExit(
-                      "TASK 183 FAIL: tamper validation could not execute"
-                  )
-
-              if violated.protected:
-                  raise SystemExit(
-                      "TASK 183 FAIL: protected change tampering was not detected"
-                  )
-
-              print(
-                  "TASK 183 PASS: existing changes are protected "
-                  "and tampering is detected"
-              )
+              print("TASK 183 DELETION PROTECTION PASS")
+              print("violations:", result.violations)
           PY
 
-      - name: Verify no Python bytecode was generated
+      - name: Verify bytecode did not modify the working tree
         run: |
-          if find src tests -type f \
-            \( -name "*.pyc" -o -name "*.pyo" \) \
-            -print -quit | grep -q .; then
-            echo "TASK 183 FAIL: Python bytecode was generated"
-            find src tests -type f \
-              \( -name "*.pyc" -o -name "*.pyo" \) \
-              -print
-          else
-            echo "No Python bytecode generated."
+          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
+
+          if [ -n "$changed" ]; then
+            echo "TASK 183 FAIL: bytecode changes detected"
+            printf '%s\n' "$changed"
+            false
           fi
+
+          echo "TASK 183 BYTECODE PASS"

@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
+import hashlib
+import os
 from pathlib import Path
 import subprocess
 from typing import Optional
 
 
+class ExistingChangeProtectionError(RuntimeError):
+    """Raised when existing-change protection cannot be evaluated."""
+
+
 @dataclass(frozen=True)
 class ProtectedChange:
-    path: str
+    relative_path: str
     status: str
     fingerprint: str
 
 
 @dataclass(frozen=True)
 class ExistingChangeProtection:
-    repository_root: Path
+    repository_root: str
     changes: tuple[ProtectedChange, ...]
-    valid: bool
-    reason: str
 
 
 @dataclass(frozen=True)
@@ -30,268 +33,199 @@ class ProtectionValidationResult:
     reason: str
 
 
-def _run_git(
+def _git(
     repository_root: Path,
-    arguments: list[str],
+    *arguments: str,
     timeout: float,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *arguments],
-        cwd=repository_root,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=timeout,
-    )
+) -> str:
+    try:
+        completed = subprocess.run(
+            ("git", *arguments),
+            cwd=repository_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ExistingChangeProtectionError(
+            "GIT_STATUS_UNAVAILABLE"
+        ) from error
+
+    if completed.returncode != 0:
+        raise ExistingChangeProtectionError(
+            f"GIT_COMMAND_FAILED:{completed.stderr.strip()}"
+        )
+
+    return completed.stdout
 
 
 def _repository_root(
-    start_path: Path,
+    start_path: str | os.PathLike[str],
     timeout: float,
-) -> Optional[Path]:
-    result = _run_git(
-        start_path,
-        ["rev-parse", "--show-toplevel"],
-        timeout,
-    )
+) -> Path:
+    candidate = Path(start_path).expanduser().resolve()
 
-    if result.returncode != 0:
-        return None
-
-    value = result.stdout.strip()
-
-    if not value:
-        return None
-
-    return Path(value).resolve()
-
-
-def _status_lines(
-    repository_root: Path,
-    timeout: float,
-) -> tuple[str, ...]:
-    result = _run_git(
-        repository_root,
-        [
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--no-renames",
-        ],
-        timeout,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git status failed: {result.stderr.strip()}"
+    if not candidate.exists() or not candidate.is_dir():
+        raise ExistingChangeProtectionError(
+            "REPOSITORY_ROOT_INVALID"
         )
 
-    return tuple(
-        line
-        for line in result.stdout.splitlines()
-        if line
-    )
+    output = _git(
+        candidate,
+        "rev-parse",
+        "--show-toplevel",
+        timeout=timeout,
+    ).strip()
 
+    root = Path(output).resolve()
 
-def _fingerprint_path(
-    repository_root: Path,
-    relative_path: str,
-) -> str:
-    path = repository_root / relative_path
-
-    if not path.exists() and not path.is_symlink():
-        return "MISSING"
-
-    if path.is_symlink():
-        target = path.readlink().as_posix()
-        return "SYMLINK:" + sha256(
-            target.encode("utf-8")
-        ).hexdigest()
-
-    if path.is_file():
-        digest = sha256()
-
-        with path.open("rb") as handle:
-            for chunk in iter(
-                lambda: handle.read(1024 * 1024),
-                b"",
-            ):
-                digest.update(chunk)
-
-        return "FILE:" + digest.hexdigest()
-
-    if path.is_dir():
-        digest = sha256()
-
-        entries = sorted(
-            child
-            for child in path.rglob("*")
-            if child.is_file() or child.is_symlink()
+    if not root.exists() or not root.is_dir():
+        raise ExistingChangeProtectionError(
+            "REPOSITORY_ROOT_INVALID"
         )
 
-        for child in entries:
-            relative = child.relative_to(repository_root).as_posix()
+    return root
 
-            if child.is_symlink():
-                content = (
-                    "SYMLINK:"
-                    + child.readlink().as_posix()
-                ).encode("utf-8")
-            else:
-                child_digest = sha256()
-                with child.open("rb") as handle:
-                    for chunk in iter(
-                        lambda: handle.read(1024 * 1024),
-                        b"",
-                    ):
-                        child_digest.update(chunk)
 
-                content = (
-                    "FILE:"
-                    + child_digest.hexdigest()
-                ).encode("utf-8")
+def _status_entries(
+    root: Path,
+    timeout: float,
+) -> tuple[tuple[str, str], ...]:
+    output = _git(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        timeout=timeout,
+    )
 
-            digest.update(
-                relative.encode("utf-8")
+    entries: list[tuple[str, str]] = []
+
+    for line in output.splitlines():
+        if not line:
+            continue
+
+        if len(line) < 3:
+            raise ExistingChangeProtectionError(
+                "INVALID_GIT_STATUS_ENTRY"
             )
-            digest.update(b"\0")
-            digest.update(content)
-            digest.update(b"\0")
 
-        return "DIR:" + digest.hexdigest()
+        status = line[:2]
+        path_text = line[3:]
 
+        # Git may quote unusual paths.  For the protection mechanism
+        # we preserve Git's reported relative path exactly.
+        if " -> " in path_text:
+            path_text = path_text.split(" -> ", 1)[1]
+
+        if not path_text:
+            raise ExistingChangeProtectionError(
+                "EMPTY_GIT_STATUS_PATH"
+            )
+
+        entries.append((path_text, status))
+
+    return tuple(entries)
+
+
+def _fingerprint(path: Path) -> str:
     try:
-        metadata = path.stat()
-        value = (
-            f"MODE:{metadata.st_mode}:"
-            f"SIZE:{metadata.st_size}"
-        )
+        if path.is_symlink():
+            target = os.readlink(path)
+            payload = f"SYMLINK\0{target}".encode("utf-8", "surrogateescape")
+            return hashlib.sha256(payload).hexdigest()
+
+        if path.is_file():
+            digest = hashlib.sha256()
+            digest.update(b"FILE\0")
+
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+
+            return digest.hexdigest()
+
+        if path.is_dir():
+            digest = hashlib.sha256()
+            digest.update(b"DIRECTORY\0")
+
+            try:
+                children = sorted(
+                    path.iterdir(),
+                    key=lambda item: item.name,
+                )
+            except OSError as error:
+                raise ExistingChangeProtectionError(
+                    "DIRECTORY_INSPECTION_FAILED"
+                ) from error
+
+            for child in children:
+                digest.update(child.name.encode(
+                    "utf-8",
+                    "surrogateescape",
+                ))
+                digest.update(b"\0")
+                digest.update(_fingerprint(child).encode("ascii"))
+                digest.update(b"\0")
+
+            return digest.hexdigest()
+
+        try:
+            stat_result = path.stat()
+        except OSError as error:
+            raise ExistingChangeProtectionError(
+                "PATH_STAT_FAILED"
+            ) from error
+
+        payload = (
+            f"OTHER\0{stat_result.st_mode}\0"
+            f"{stat_result.st_size}\0"
+        ).encode()
+
+        return hashlib.sha256(payload).hexdigest()
+
+    except ExistingChangeProtectionError:
+        raise
     except OSError as error:
-        value = f"STAT_ERROR:{error}"
-
-    return "OTHER:" + sha256(
-        value.encode("utf-8")
-    ).hexdigest()
-
-
-def _parse_status_line(
-    line: str,
-) -> tuple[str, str]:
-    if len(line) < 3:
-        raise ValueError(
-            f"Invalid porcelain status line: {line!r}"
-        )
-
-    return line[:2], line[3:]
+        raise ExistingChangeProtectionError(
+            f"FINGERPRINT_FAILED:{path}"
+        ) from error
 
 
 def capture_existing_change_protection(
-    start_path: str | Path,
+    start_path: str | os.PathLike[str],
     timeout: float = 10.0,
 ) -> ExistingChangeProtection:
-    try:
-        start = Path(start_path).expanduser().resolve()
-    except (OSError, RuntimeError, TypeError) as error:
-        return ExistingChangeProtection(
-            repository_root=Path(".").resolve(),
-            changes=(),
-            valid=False,
-            reason=f"INVALID_START_PATH: {error}",
+    if timeout <= 0:
+        raise ExistingChangeProtectionError(
+            "INVALID_TIMEOUT"
         )
 
-    if not start.exists():
-        return ExistingChangeProtection(
-            repository_root=start,
-            changes=(),
-            valid=False,
-            reason="START_PATH_NOT_FOUND",
-        )
+    root = _repository_root(start_path, timeout)
+    entries = _status_entries(root, timeout)
 
-    if not start.is_dir():
-        return ExistingChangeProtection(
-            repository_root=start,
-            changes=(),
-            valid=False,
-            reason="START_PATH_NOT_DIRECTORY",
-        )
+    changes: list[ProtectedChange] = []
 
-    try:
-        root = _repository_root(start, timeout)
-    except subprocess.TimeoutExpired:
-        return ExistingChangeProtection(
-            repository_root=start,
-            changes=(),
-            valid=False,
-            reason="GIT_ROOT_TIMEOUT",
-        )
-    except OSError as error:
-        return ExistingChangeProtection(
-            repository_root=start,
-            changes=(),
-            valid=False,
-            reason=f"GIT_ROOT_EXECUTION_ERROR: {error}",
-        )
+    for relative_path, status in entries:
+        candidate = root / relative_path
 
-    if root is None:
-        return ExistingChangeProtection(
-            repository_root=start,
-            changes=(),
-            valid=False,
-            reason="NOT_A_GIT_REPOSITORY",
-        )
-
-    try:
-        lines = _status_lines(root, timeout)
-    except subprocess.TimeoutExpired:
-        return ExistingChangeProtection(
-            repository_root=root,
-            changes=(),
-            valid=False,
-            reason="GIT_STATUS_TIMEOUT",
-        )
-    except (OSError, RuntimeError) as error:
-        return ExistingChangeProtection(
-            repository_root=root,
-            changes=(),
-            valid=False,
-            reason=f"GIT_STATUS_ERROR: {error}",
-        )
-
-    protected: list[ProtectedChange] = []
-
-    try:
-        for line in lines:
-            status, relative_path = _parse_status_line(line)
-
-            fingerprint = _fingerprint_path(
-                root,
-                relative_path,
+        changes.append(
+            ProtectedChange(
+                relative_path=relative_path,
+                status=status,
+                fingerprint=_fingerprint(candidate),
             )
-
-            protected.append(
-                ProtectedChange(
-                    path=relative_path,
-                    status=status,
-                    fingerprint=fingerprint,
-                )
-            )
-    except (OSError, ValueError, RuntimeError) as error:
-        return ExistingChangeProtection(
-            repository_root=root,
-            changes=(),
-            valid=False,
-            reason=f"PROTECTION_CAPTURE_ERROR: {error}",
         )
 
     return ExistingChangeProtection(
-        repository_root=root,
-        changes=tuple(protected),
-        valid=True,
-        reason=(
-            "EXISTING_CHANGES_CAPTURED"
-            if protected
-            else "NO_EXISTING_CHANGES"
-        ),
+        repository_root=str(root),
+        changes=tuple(changes),
     )
 
 
@@ -299,94 +233,68 @@ def validate_existing_change_protection(
     protection: ExistingChangeProtection,
     timeout: float = 10.0,
 ) -> ProtectionValidationResult:
-    if not protection.valid:
-        return ProtectionValidationResult(
-            valid=False,
-            protected=False,
-            violations=(
-                f"INVALID_PROTECTION_STATE: {protection.reason}",
-            ),
-            reason="INVALID_PROTECTION_STATE",
+    if not isinstance(
+        protection,
+        ExistingChangeProtection,
+    ):
+        raise ExistingChangeProtectionError(
+            "INVALID_PROTECTION_OBJECT"
         )
 
-    root = protection.repository_root
+    if timeout <= 0:
+        raise ExistingChangeProtectionError(
+            "INVALID_TIMEOUT"
+        )
+
+    root = Path(protection.repository_root).resolve()
 
     if not root.exists() or not root.is_dir():
         return ProtectionValidationResult(
             valid=False,
             protected=False,
-            violations=("REPOSITORY_ROOT_UNAVAILABLE",),
-            reason="REPOSITORY_ROOT_UNAVAILABLE",
+            violations=("REPOSITORY_ROOT_MISSING",),
+            reason="REPOSITORY_ROOT_MISSING",
         )
 
-    try:
-        current_lines = _status_lines(root, timeout)
-    except subprocess.TimeoutExpired:
-        return ProtectionValidationResult(
-            valid=False,
-            protected=False,
-            violations=("GIT_STATUS_TIMEOUT",),
-            reason="GIT_STATUS_TIMEOUT",
-        )
-    except (OSError, RuntimeError) as error:
-        return ProtectionValidationResult(
-            valid=False,
-            protected=False,
-            violations=(f"GIT_STATUS_ERROR: {error}",),
-            reason="GIT_STATUS_ERROR",
-        )
-
-    current_by_path: dict[str, tuple[str, str]] = {}
-
-    try:
-        for line in current_lines:
-            status, relative_path = _parse_status_line(line)
-
-            current_by_path[relative_path] = (
-                status,
-                _fingerprint_path(
-                    root,
-                    relative_path,
-                ),
-            )
-    except (OSError, ValueError, RuntimeError) as error:
-        return ProtectionValidationResult(
-            valid=False,
-            protected=False,
-            violations=(
-                f"PROTECTION_VALIDATION_ERROR: {error}",
-            ),
-            reason="PROTECTION_VALIDATION_ERROR",
-        )
+    current_entries = dict(
+        _status_entries(root, timeout)
+    )
 
     violations: list[str] = []
 
-    for protected_change in protection.changes:
-        current = current_by_path.get(
-            protected_change.path
-        )
+    for protected in protection.changes:
+        relative_path = protected.relative_path
+        candidate = root / relative_path
 
-        if current is None:
+        # CRITICAL FIX:
+        # A protected file that was deleted must be reported explicitly
+        # as missing.  Do this before status/fingerprint comparison.
+        if not candidate.exists() and not candidate.is_symlink():
             violations.append(
-                "PROTECTED_CHANGE_MISSING:"
-                f"{protected_change.path}"
+                f"PROTECTED_CHANGE_MISSING:{relative_path}"
             )
             continue
 
-        current_status, current_fingerprint = current
+        current_status = current_entries.get(relative_path)
 
-        if current_status != protected_change.status:
+        if current_status is None:
+            violations.append(
+                f"PROTECTED_CHANGE_MISSING:{relative_path}"
+            )
+            continue
+
+        if current_status != protected.status:
             violations.append(
                 "PROTECTED_STATUS_CHANGED:"
-                f"{protected_change.path}:"
-                f"{protected_change.status!r}->"
-                f"{current_status!r}"
+                f"{relative_path}:"
+                f"{protected.status!r}->{current_status!r}"
             )
 
-        if current_fingerprint != protected_change.fingerprint:
+        current_fingerprint = _fingerprint(candidate)
+
+        if current_fingerprint != protected.fingerprint:
             violations.append(
-                "PROTECTED_CONTENT_CHANGED:"
-                f"{protected_change.path}"
+                f"PROTECTED_CONTENT_CHANGED:{relative_path}"
             )
 
     if violations:
@@ -401,18 +309,22 @@ def validate_existing_change_protection(
         valid=True,
         protected=True,
         violations=(),
-        reason=(
-            "EXISTING_CHANGES_PROTECTED"
-            if protection.changes
-            else "NO_EXISTING_CHANGES_TO_PROTECT"
-        ),
+        reason="EXISTING_CHANGE_PROTECTION_PASSED",
     )
 
 
-__all__ = [
-    "ProtectedChange",
-    "ExistingChangeProtection",
-    "ProtectionValidationResult",
-    "capture_existing_change_protection",
-    "validate_existing_change_protection",
-]
+def require_existing_change_protection(
+    protection: ExistingChangeProtection,
+    timeout: float = 10.0,
+) -> ProtectionValidationResult:
+    result = validate_existing_change_protection(
+        protection,
+        timeout=timeout,
+    )
+
+    if not result.protected:
+        raise ExistingChangeProtectionError(
+            ";".join(result.violations)
+        )
+
+    return result
