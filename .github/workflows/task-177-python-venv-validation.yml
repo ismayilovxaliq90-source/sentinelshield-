@@ -1,0 +1,99 @@
+name: SentinelShield Task 177
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-177:
+    name: Python Virtual Environment Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Create isolated Python virtual environment
+        run: |
+          python -m venv "$RUNNER_TEMP/sentinelshield-task177-venv"
+
+      - name: Verify virtual environment structure
+        shell: bash
+        run: |
+          test -f "$RUNNER_TEMP/sentinelshield-task177-venv/pyvenv.cfg"
+          test -x "$RUNNER_TEMP/sentinelshield-task177-venv/bin/python"
+
+      - name: Install test dependency inside server venv
+        run: |
+          "$RUNNER_TEMP/sentinelshield-task177-venv/bin/python" \
+            -m pip install \
+            --disable-pip-version-check \
+            pytest
+
+      - name: Run Task 177 tests in server venv
+        env:
+          PYTHONPATH: src
+        run: |
+          "$RUNNER_TEMP/sentinelshield-task177-venv/bin/python" \
+            -m pytest \
+            tests/test_python_virtual_environment_validation.py \
+            -q
+
+      - name: Execute Task 177 validation
+        env:
+          PYTHONPATH: src
+          SENTINELSHIELD_VENV: ${{ runner.temp }}/sentinelshield-task177-venv
+        run: |
+          "$RUNNER_TEMP/sentinelshield-task177-venv/bin/python" - <<'PY'
+          import sys
+
+          from sentinelshield.python_virtual_environment_validation import (
+              PythonVirtualEnvironmentValidationInput,
+              validate_python_virtual_environment,
+              write_validation_evidence,
+          )
+
+          request = PythonVirtualEnvironmentValidationInput(
+              environment_path=sys.prefix,
+              require_virtual_environment=True,
+          )
+
+          result = validate_python_virtual_environment(request)
+
+          write_validation_evidence(
+              result,
+              "artifacts/task177/python_virtual_environment_validation.json",
+          )
+
+          print("=== TASK 177 — PYTHON VIRTUAL ENVIRONMENT VALIDATION ===")
+          print(f"STATUS: {result.status}")
+          print(f"ENVIRONMENT: {result.environment_path}")
+          print(f"PYTHON: {result.python_executable}")
+          print(f"PYTHON_VERSION: {result.python_version}")
+          print(f"PYVENV_CFG: {result.pyvenv_cfg_exists}")
+          print(f"EXECUTABLE: {result.python_executable_exists}")
+          print(f"REASONS: {', '.join(result.reasons)}")
+          print(f"ERRORS: {', '.join(result.errors)}")
+
+          if not result.valid:
+              raise SystemExit(1)
+          PY
+
+      - name: Upload Task 177 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinelshield-task-177-evidence
+          path: artifacts/task177/python_virtual_environment_validation.json
+          if-no-files-found: warn
