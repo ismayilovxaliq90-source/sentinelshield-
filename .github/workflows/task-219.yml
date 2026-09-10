@@ -24,7 +24,7 @@ jobs:
       - name: Install pytest
         run: python -m pip install pytest
 
-      - name: Run TASK 219 tests
+      - name: Run TASK 219
         env:
           PYTHONPATH: src
         run: python -m pytest -q tests/test_dependency_version_diff.py

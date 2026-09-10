@@ -19,28 +19,42 @@ class DependencyVersionDiffState(str, Enum):
     UNEXPECTED_CHANGE = "UNEXPECTED_CHANGE"
 
 
-def _validate_text(value: object, field: str, maximum: int) -> str:
+def _validate_text(
+    value: object,
+    field: str,
+    maximum: int,
+) -> str:
     if not isinstance(value, str):
-        raise DependencyVersionDiffError(f"{field} must be a string")
+        raise DependencyVersionDiffError(
+            f"{field} must be a string"
+        )
 
     if not value or not value.strip():
-        raise DependencyVersionDiffError(f"{field} must not be empty")
+        raise DependencyVersionDiffError(
+            f"{field} must not be empty"
+        )
 
     value = value.strip()
 
     if len(value) > maximum:
-        raise DependencyVersionDiffError(f"{field} is too long")
+        raise DependencyVersionDiffError(
+            f"{field} is too long"
+        )
 
-    if "\\x00" in value:
-        raise DependencyVersionDiffError(f"{field} contains NULL")
+    if "\x00" in value:
+        raise DependencyVersionDiffError(
+            f"{field} contains NULL"
+        )
 
     return value
 
 
-def _normalize_dependencies(values: Mapping[object, object]) -> dict[str, str]:
+def _normalize_dependencies(
+    values: Mapping[object, object],
+) -> dict[str, str]:
     if not isinstance(values, Mapping):
         raise DependencyVersionDiffError(
-            "dependency versions must be a mapping"
+            "dependencies must be a mapping"
         )
 
     result: dict[str, str] = {}
@@ -121,18 +135,18 @@ class DependencyVersionDiffResult:
         }
 
 
-def analyze_dependency_version_diff(
+def compare_dependency_versions(
     before: Mapping[object, object],
     after: Mapping[object, object],
     expected: Mapping[object, object] | None = None,
 ) -> DependencyVersionDiffResult:
     """
-    TASK 219:
-    Compare dependency versions before and after remediation.
+    TASK 219 — Dependency Version Diff Analysis.
 
-    Only version differences are analyzed here.
+    Compares dependency versions before and after remediation.
+
     This function does not modify files, install packages,
-    regenerate lockfiles, or execute remediation.
+    execute commands, regenerate lockfiles, or perform rollback.
     """
 
     old = _normalize_dependencies(before)
@@ -143,24 +157,29 @@ def analyze_dependency_version_diff(
     expected_changes: list[DependencyVersionChange] = []
     unexpected_changes: list[DependencyVersionChange] = []
 
-    for name in sorted(set(old) | set(new)):
-        previous = old.get(name)
-        current = new.get(name)
+    dependency_names = sorted(set(old) | set(new))
 
-        if previous == current:
+    for name in dependency_names:
+        before_version = old.get(name)
+        after_version = new.get(name)
+
+        if before_version == after_version:
             continue
 
         approved_version = approved.get(name)
 
-        if approved_version is not None and current == approved_version:
+        if (
+            approved_version is not None
+            and after_version == approved_version
+        ):
             state = DependencyVersionDiffState.EXPECTED_CHANGE
         else:
             state = DependencyVersionDiffState.UNEXPECTED_CHANGE
 
         change = DependencyVersionChange(
             name=name,
-            before=previous,
-            after=current,
+            before=before_version,
+            after=after_version,
             state=state,
         )
 
@@ -172,14 +191,20 @@ def analyze_dependency_version_diff(
             unexpected_changes.append(change)
 
     if unexpected_changes:
-        overall = DependencyVersionDiffState.UNEXPECTED_CHANGE
+        overall_state = (
+            DependencyVersionDiffState.UNEXPECTED_CHANGE
+        )
     elif expected_changes:
-        overall = DependencyVersionDiffState.EXPECTED_CHANGE
+        overall_state = (
+            DependencyVersionDiffState.EXPECTED_CHANGE
+        )
     else:
-        overall = DependencyVersionDiffState.NO_CHANGE
+        overall_state = (
+            DependencyVersionDiffState.NO_CHANGE
+        )
 
     return DependencyVersionDiffResult(
-        state=overall,
+        state=overall_state,
         changes=tuple(changes),
         expected_changes=tuple(expected_changes),
         unexpected_changes=tuple(unexpected_changes),
@@ -191,5 +216,5 @@ __all__ = [
     "DependencyVersionDiffState",
     "DependencyVersionChange",
     "DependencyVersionDiffResult",
-    "analyze_dependency_version_diff",
+    "compare_dependency_versions",
 ]
