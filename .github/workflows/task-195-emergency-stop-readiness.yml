@@ -1,0 +1,115 @@
+name: TASK 195 - Emergency Stop Readiness
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/sentinelshield/emergency_stop_readiness.py"
+      - "tests/test_emergency_stop_readiness.py"
+      - ".github/workflows/task-195-emergency-stop-readiness.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  task-195:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.emergency_stop_readiness"
+
+      - name: Run TASK 195 tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_emergency_stop_readiness.py
+
+      - name: Live emergency-stop validation
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          from sentinelshield.emergency_stop_readiness import (
+              EmergencyStopError,
+              EmergencyStopState,
+              create_emergency_stop_controller,
+          )
+
+          controller = create_emergency_stop_controller()
+
+          initial = controller.status()
+
+          if initial.state is not EmergencyStopState.READY:
+              raise SystemExit(
+                  "TASK 195 FAIL: controller not initially READY"
+              )
+
+          controller.trigger("live safety stop")
+
+          stopped = controller.status()
+
+          if not stopped.stopped:
+              raise SystemExit(
+                  "TASK 195 FAIL: emergency stop was not activated"
+              )
+
+          if stopped.reason != "live safety stop":
+              raise SystemExit(
+                  "TASK 195 FAIL: stop reason was not preserved"
+              )
+
+          try:
+              controller.require_execution_allowed()
+          except EmergencyStopError:
+              pass
+          else:
+              raise SystemExit(
+                  "TASK 195 FAIL: execution bypassed emergency stop"
+              )
+
+          controller.reset()
+
+          ready = controller.status()
+
+          if ready.state is not EmergencyStopState.READY:
+              raise SystemExit(
+                  "TASK 195 FAIL: reset did not restore READY state"
+              )
+
+          controller.require_execution_allowed()
+
+          print("TASK 195 PASS")
+
+          PY
+
+      - name: Verify no bytecode changes
+        run: |
+          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
+
+          if [ -n "$changed" ]; then
+            echo "TASK 195 FAIL: Python bytecode changes detected"
+            echo "$changed"
+            exit 1
+          fi
+
+          echo "TASK 195 PASS: no bytecode changes"
