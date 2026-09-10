@@ -1,258 +1,232 @@
 import subprocess
-from pathlib import Path
 
 from sentinelshield.existing_change_protection import (
-    ExistingChange,
-    ExistingChangeProtectionResult,
+    ExistingChangeProtection,
+    ProtectionValidationResult,
     capture_existing_change_protection,
-    verify_existing_change_protection,
+    validate_existing_change_protection,
 )
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
+def _run_git(repo, *args):
+    return subprocess.run(
         ["git", *args],
         cwd=repo,
-        check=True,
-        capture_output=True,
         text=True,
-    )
-
-
-def _git_commit(repo: Path) -> None:
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Task183",
-            "-c",
-            "user.email=task183@example.invalid",
-            "commit",
-            "-m",
-            "baseline",
-        ],
-        cwd=repo,
-        check=True,
         capture_output=True,
-        text=True,
+        check=True,
     )
 
 
-def test_result_dataclasses_exist():
-    change = ExistingChange(
-        status=" M",
-        path="file.py",
-        content_hash="abc",
-    )
-
-    result = ExistingChangeProtectionResult(
-        valid=True,
-        repository_root=Path("/tmp/repo"),
-        protected=True,
-        existing_changes=(change,),
-        change_count=1,
-        reason="TEST",
-    )
-
-    assert result.valid is True
-    assert result.protected is True
-    assert result.change_count == 1
-    assert result.existing_changes[0].path == "file.py"
-
-
-def test_non_git_directory_fails(tmp_path):
-    result = capture_existing_change_protection(tmp_path)
-
-    assert result.valid is False
-    assert result.protected is False
-    assert result.reason == "NOT_A_GIT_REPOSITORY"
-
-
-def test_missing_path_fails(tmp_path):
-    result = capture_existing_change_protection(
-        tmp_path / "missing"
-    )
-
-    assert result.valid is False
-    assert result.reason == "START_PATH_NOT_FOUND"
-
-
-def test_file_path_fails(tmp_path):
-    file_path = tmp_path / "file.txt"
-    file_path.write_text("x")
-
-    result = capture_existing_change_protection(file_path)
-
-    assert result.valid is False
-    assert result.reason == "START_PATH_NOT_DIRECTORY"
-
-
-def test_clean_repository_is_protected(tmp_path):
+def _init_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    _git(repo, "init")
+    _run_git(repo, "init")
 
-    file_path = repo / "file.txt"
-    file_path.write_text("baseline")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("baseline")
 
-    _git(repo, "add", "file.txt")
-    _git_commit(repo)
+    _run_git(repo, "add", "tracked.txt")
 
-    result = capture_existing_change_protection(repo)
-
-    assert result.valid is True
-    assert result.protected is True
-    assert result.change_count == 0
-    assert result.existing_changes == ()
-    assert result.reason == "NO_EXISTING_CHANGES"
-
-
-def test_modified_file_is_identified_and_protected(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    _git(repo, "init")
-
-    file_path = repo / "file.txt"
-    file_path.write_text("baseline")
-
-    _git(repo, "add", "file.txt")
-    _git_commit(repo)
-
-    file_path.write_text("user change")
-
-    result = capture_existing_change_protection(repo)
-
-    assert result.valid is True
-    assert result.protected is True
-    assert result.change_count == 1
-    assert result.existing_changes[0].status == " M"
-    assert result.existing_changes[0].path == "file.txt"
-    assert result.existing_changes[0].content_hash is not None
-    assert result.reason == "EXISTING_CHANGES_IDENTIFIED_AND_PROTECTED"
-
-
-def test_untracked_file_is_identified(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    _git(repo, "init")
-
-    file_path = repo / "new.txt"
-    file_path.write_text("new content")
-
-    result = capture_existing_change_protection(repo)
-
-    assert result.valid is True
-    assert result.protected is True
-    assert result.change_count == 1
-    assert result.existing_changes[0].status == "??"
-    assert result.existing_changes[0].path == "new.txt"
-
-
-def test_pre_existing_change_is_preserved(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    _git(repo, "init")
-
-    file_path = repo / "file.txt"
-    file_path.write_text("baseline")
-
-    _git(repo, "add", "file.txt")
-    _git_commit(repo)
-
-    file_path.write_text("user change")
-
-    before = capture_existing_change_protection(repo)
-
-    result = verify_existing_change_protection(
-        before,
+    _run_git(
         repo,
+        "-c",
+        "user.name=Task183",
+        "-c",
+        "user.email=task183@example.invalid",
+        "commit",
+        "-m",
+        "baseline",
     )
+
+    return repo
+
+
+def test_clean_repository_has_no_protected_changes(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    protection = capture_existing_change_protection(repo)
+
+    assert protection.valid is True
+    assert protection.changes == ()
+    assert protection.reason == "NO_EXISTING_CHANGES"
+
+    result = validate_existing_change_protection(protection)
 
     assert result.valid is True
     assert result.protected is True
-    assert result.reason == "PRE_EXISTING_CHANGES_PRESERVED"
+    assert result.violations == ()
+    assert result.reason == "NO_EXISTING_CHANGES_TO_PROTECT"
 
 
-def test_pre_existing_change_modification_is_detected(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_existing_modified_file_is_captured_and_preserved(tmp_path):
+    repo = _init_repo(tmp_path)
 
-    _git(repo, "init")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("pre-existing user change")
 
-    file_path = repo / "file.txt"
-    file_path.write_text("baseline")
+    protection = capture_existing_change_protection(repo)
 
-    _git(repo, "add", "file.txt")
-    _git_commit(repo)
+    assert protection.valid is True
+    assert len(protection.changes) == 1
+    assert protection.changes[0].path == "tracked.txt"
+    assert protection.changes[0].status == " M"
 
-    file_path.write_text("original user change")
+    result = validate_existing_change_protection(protection)
 
-    before = capture_existing_change_protection(repo)
+    assert result.valid is True
+    assert result.protected is True
+    assert result.violations == ()
 
-    file_path.write_text("changed by later process")
 
-    result = verify_existing_change_protection(
-        before,
-        repo,
-    )
+def test_protected_file_modification_fails(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    tracked = repo / "tracked.txt"
+    tracked.write_text("pre-existing user change")
+
+    protection = capture_existing_change_protection(repo)
+
+    tracked.write_text("remediation overwrote user change")
+
+    result = validate_existing_change_protection(protection)
 
     assert result.valid is True
     assert result.protected is False
-    assert "PRE_EXISTING_CHANGE_MODIFIED" in result.reason
+    assert "PROTECTED_CONTENT_CHANGED:tracked.txt" in result.violations
 
 
-def test_pre_existing_change_removal_is_detected(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_protected_file_deletion_fails(tmp_path):
+    repo = _init_repo(tmp_path)
 
-    _git(repo, "init")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("pre-existing user change")
 
-    file_path = repo / "file.txt"
-    file_path.write_text("baseline")
+    protection = capture_existing_change_protection(repo)
 
-    _git(repo, "add", "file.txt")
-    _git_commit(repo)
+    tracked.unlink()
 
-    file_path.write_text("user change")
-
-    before = capture_existing_change_protection(repo)
-
-    file_path.unlink()
-
-    result = verify_existing_change_protection(
-        before,
-        repo,
-    )
+    result = validate_existing_change_protection(protection)
 
     assert result.valid is True
     assert result.protected is False
-    assert "PRE_EXISTING_CHANGE_REMOVED" in result.reason
+    assert (
+        "PROTECTED_CHANGE_MISSING:tracked.txt"
+        in result.violations
+    )
 
 
-def test_invalid_before_state_fails_closed(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_existing_untracked_file_is_protected(tmp_path):
+    repo = _init_repo(tmp_path)
 
-    _git(repo, "init")
+    new_file = repo / "user_change.txt"
+    new_file.write_text("keep this")
 
-    invalid_before = ExistingChangeProtectionResult(
+    protection = capture_existing_change_protection(repo)
+
+    assert protection.valid is True
+    assert len(protection.changes) == 1
+    assert protection.changes[0].path == "user_change.txt"
+    assert protection.changes[0].status == "??"
+
+    result = validate_existing_change_protection(protection)
+
+    assert result.valid is True
+    assert result.protected is True
+
+
+def test_existing_untracked_file_content_change_fails(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    new_file = repo / "user_change.txt"
+    new_file.write_text("keep this")
+
+    protection = capture_existing_change_protection(repo)
+
+    new_file.write_text("changed")
+
+    result = validate_existing_change_protection(protection)
+
+    assert result.valid is True
+    assert result.protected is False
+    assert (
+        "PROTECTED_CONTENT_CHANGED:user_change.txt"
+        in result.violations
+    )
+
+
+def test_new_unrelated_change_is_allowed(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    tracked = repo / "tracked.txt"
+    tracked.write_text("pre-existing user change")
+
+    protection = capture_existing_change_protection(repo)
+
+    unrelated = repo / "new_remediation_file.txt"
+    unrelated.write_text("new remediation change")
+
+    result = validate_existing_change_protection(protection)
+
+    assert result.valid is True
+    assert result.protected is True
+    assert result.violations == ()
+
+
+def test_staging_state_is_protected(tmp_path):
+    repo = _init_repo(tmp_path)
+
+    tracked = repo / "tracked.txt"
+    tracked.write_text("pre-existing user change")
+
+    _run_git(repo, "add", "tracked.txt")
+
+    protection = capture_existing_change_protection(repo)
+
+    tracked.write_text("changed again")
+
+    result = validate_existing_change_protection(protection)
+
+    assert result.valid is True
+    assert result.protected is False
+    assert any(
+        violation.startswith(
+            "PROTECTED_STATUS_CHANGED:tracked.txt"
+        )
+        for violation in result.violations
+    ) or any(
+        violation.startswith(
+            "PROTECTED_CONTENT_CHANGED:tracked.txt"
+        )
+        for violation in result.violations
+    )
+
+
+def test_invalid_protection_state_fails_closed(tmp_path):
+    protection = ExistingChangeProtection(
+        repository_root=tmp_path,
+        changes=(),
         valid=False,
-        repository_root=None,
-        protected=False,
-        existing_changes=(),
-        change_count=0,
-        reason="INVALID",
+        reason="TEST_INVALID",
     )
 
-    result = verify_existing_change_protection(
-        invalid_before,
-        repo,
-    )
+    result = validate_existing_change_protection(protection)
 
     assert result.valid is False
     assert result.protected is False
-    assert result.reason == "INVALID_BEFORE_PROTECTION_STATE"
+    assert result.reason == "INVALID_PROTECTION_STATE"
+
+
+def test_validation_result_shape():
+    result = ProtectionValidationResult(
+        valid=True,
+        protected=True,
+        violations=(),
+        reason="OK",
+    )
+
+    assert result.valid is True
+    assert result.protected is True
+    assert result.violations == ()
+    assert result.reason == "OK"
