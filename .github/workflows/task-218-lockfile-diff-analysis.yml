@@ -1,0 +1,203 @@
+name: TASK 218 - Lockfile Diff Analysis
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/lockfile_diff_analysis.py"
+      - "tests/test_lockfile_diff_analysis.py"
+      - ".github/workflows/task-218-lockfile-diff-analysis.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/lockfile_diff_analysis.py"
+      - "tests/test_lockfile_diff_analysis.py"
+      - ".github/workflows/task-218-lockfile-diff-analysis.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/src
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  task-218:
+    name: TASK 218 validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify environment
+        run: |
+          set -euo pipefail
+          python --version
+          git --version
+          test -d "$GITHUB_WORKSPACE/src/sentinelshield"
+          test -f "$GITHUB_WORKSPACE/src/sentinelshield/lockfile_diff_analysis.py"
+          test -f "$GITHUB_WORKSPACE/tests/test_lockfile_diff_analysis.py"
+
+      - name: Syntax validation without bytecode writes
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -B - <<'PY'
+          import ast
+          import pathlib
+
+          root = pathlib.Path("src/sentinelshield")
+          target = root / "lockfile_diff_analysis.py"
+
+          ast.parse(
+              target.read_text(encoding="utf-8"),
+              filename=str(target),
+          )
+
+          test = pathlib.Path(
+              "tests/test_lockfile_diff_analysis.py"
+          )
+          ast.parse(
+              test.read_text(encoding="utf-8"),
+              filename=str(test),
+          )
+
+          print("TASK 218 AST syntax validation: PASS")
+          PY
+
+      - name: Import validation
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -B - <<'PY'
+          import sentinelshield.lockfile_diff_analysis as module
+
+          required = [
+              "LockfileDiffAnalysisError",
+              "LockfileDiffState",
+              "LockfileEntry",
+              "LockfileEntryChange",
+              "LockfileDiffAnalysisResult",
+              "analyze_lockfile_diff",
+              "analyze_lockfile_content",
+              "validate_lockfile_diff_result",
+          ]
+
+          missing = [
+              name for name in required
+              if not hasattr(module, name)
+          ]
+
+          if missing:
+              raise RuntimeError(
+                  f"Missing required API: {missing}"
+              )
+
+          print("TASK 218 import validation: PASS")
+          PY
+
+      - name: Install pytest
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Run TASK 218 tests only
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -B -m pytest -q \
+            tests/test_lockfile_diff_analysis.py
+
+      - name: Live lockfile diff validation
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          from sentinelshield.lockfile_diff_analysis import (
+              LockfileDiffState,
+              LockfileEntry,
+              analyze_lockfile_diff,
+          )
+
+          result = analyze_lockfile_diff(
+              [
+                  LockfileEntry("requests", "2.31.0"),
+                  LockfileEntry("urllib3", "2.4.0"),
+              ],
+              [
+                  LockfileEntry("requests", "2.32.0"),
+                  LockfileEntry("urllib3", "2.4.0"),
+              ],
+              changed_lockfiles=("package-lock.json",),
+              expected_changes=(
+                  "CHANGE:requests:2.31.0->2.32.0",
+              ),
+          )
+
+          assert result.state is LockfileDiffState.EXPECTED_CHANGE
+          assert result.valid
+          assert result.is_safe
+
+          unexpected = analyze_lockfile_diff(
+              [
+                  LockfileEntry("requests", "2.31.0"),
+              ],
+              [
+                  LockfileEntry("requests", "2.32.0"),
+                  LockfileEntry("evil-package", "9.9.9"),
+              ],
+              changed_lockfiles=("package-lock.json",),
+              expected_changes=(
+                  "CHANGE:requests:2.31.0->2.32.0",
+              ),
+          )
+
+          assert (
+              unexpected.state
+              is LockfileDiffState.UNEXPECTED_CHANGE
+          )
+          assert not unexpected.valid
+          assert unexpected.unexpected_changes
+
+          clean = analyze_lockfile_diff(
+              [LockfileEntry("requests", "2.32.0")],
+              [LockfileEntry("requests", "2.32.0")],
+          )
+
+          assert clean.state is LockfileDiffState.NO_CHANGE
+          assert clean.valid
+
+          print("TASK 218 live validation: PASS")
+          PY
+
+      - name: Verify no bytecode artifacts
+        run: |
+          set -euo pipefail
+
+          if find . \
+            -type f \
+            \( -name "*.pyc" -o -name "*.pyo" \) \
+            -not -path "./.git/*" \
+            -print -quit | grep -q .; then
+            echo "Unexpected bytecode artifact detected."
+            exit 1
+          fi
+
+          if git status --porcelain -- \
+            '*.pyc' '*.pyo' | grep -q .; then
+            echo "Tracked bytecode change detected."
+            exit 1
+          fi
+
+          echo "Bytecode protection: PASS"
+
+      - name: Final status
+        run: |
+          echo "TASK 218 - LOCKFILE DIFF ANALYSIS: PASS"
