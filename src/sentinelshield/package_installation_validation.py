@@ -1,462 +1,433 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from pathlib import Path
+import hashlib
+import json
 import os
 import subprocess
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 
-class PackageInstallationValidationError(RuntimeError):
+class PackageInstallationValidationError(Exception):
     """Raised when package-installation validation cannot be performed safely."""
 
 
-SUPPORTED_MANAGERS = frozenset(
-    {
-        "npm",
-        "pnpm",
-        "yarn",
-        "cargo",
-        "go",
-        "composer",
-        "poetry",
-    }
-)
+SUPPORTED_MANAGERS = {
+    "npm": ("npm",),
+    "pnpm": ("pnpm",),
+    "yarn": ("yarn",),
+    "pip": ("python", "-m", "pip"),
+    "poetry": ("poetry",),
+    "cargo": ("cargo",),
+    "go": ("go",),
+    "composer": ("composer",),
+}
+
+INSTALL_COMMANDS = {
+    "npm": ("npm", "install"),
+    "pnpm": ("pnpm", "install"),
+    "yarn": ("yarn", "install"),
+    "pip": ("python", "-m", "pip", "install"),
+    "poetry": ("poetry", "install"),
+    "cargo": ("cargo", "build"),
+    "go": ("go", "mod", "download"),
+    "composer": ("composer", "install"),
+}
+
+FORBIDDEN_ENV_KEYS = {
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "NPM_TOKEN",
+    "PYPI_TOKEN",
+    "POETRY_HTTP_BASIC_PASSWORD",
+    "COMPOSER_AUTH",
+}
+
+
+@dataclass(frozen=True)
+class PackageSpec:
+    name: str
+    version: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("package name must be non-empty")
+        if self.version is not None:
+            if not isinstance(self.version, str) or not self.version.strip():
+                raise ValueError("package version must be non-empty when supplied")
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {"name": self.name, "version": self.version}
+
+
+@dataclass(frozen=True)
+class InstallationFingerprint:
+    path: str
+    sha256: str
+    size: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "sha256": self.sha256,
+            "size": self.size,
+        }
 
 
 @dataclass(frozen=True)
 class PackageInstallationRequest:
-    workspace: Path
-    manager: str
+    repository_root: Path
+    package_manager: str
+    expected_packages: tuple[PackageSpec, ...] = field(default_factory=tuple)
     timeout: float = 300.0
-    environment: Mapping[str, str] | None = None
+    environment: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.repository_root, Path):
+            raise TypeError("repository_root must be pathlib.Path")
+
+        if self.package_manager not in SUPPORTED_MANAGERS:
+            raise ValueError(
+                f"unsupported package manager: {self.package_manager}"
+            )
+
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+        for package in self.expected_packages:
+            if not isinstance(package, PackageSpec):
+                raise TypeError("expected_packages must contain PackageSpec values")
+
+        for key in self.environment:
+            if key.upper() in FORBIDDEN_ENV_KEYS:
+                raise ValueError(f"secret environment variable is forbidden: {key}")
 
 
 @dataclass(frozen=True)
-class InstalledPackage:
-    name: str
-    version: str
-    source: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "version": self.version,
-            "source": self.source,
-        }
-
-
-@dataclass(frozen=True)
-class PackageInstallationResult:
+class PackageInstallationValidationResult:
     success: bool
-    manager: str
+    package_manager: str
     command: tuple[str, ...]
-    returncode: int | None
+    exit_code: int | None
+    timed_out: bool
     stdout: str
     stderr: str
-    timed_out: bool
-    installed_packages: tuple[InstalledPackage, ...]
-    error: str | None
+    expected_packages: tuple[PackageSpec, ...]
+    missing_packages: tuple[str, ...]
+    unexpected_packages: tuple[str, ...]
+    fingerprints: tuple[InstallationFingerprint, ...]
+    reason: str
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, object]:
         return {
             "success": self.success,
-            "manager": self.manager,
+            "package_manager": self.package_manager,
             "command": list(self.command),
-            "returncode": self.returncode,
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
             "stdout": self.stdout,
             "stderr": self.stderr,
-            "timed_out": self.timed_out,
-            "installed_packages": [
-                package.to_dict()
-                for package in self.installed_packages
+            "expected_packages": [
+                package.to_dict() for package in self.expected_packages
             ],
-            "error": self.error,
+            "missing_packages": list(self.missing_packages),
+            "unexpected_packages": list(self.unexpected_packages),
+            "fingerprints": [
+                fingerprint.to_dict()
+                for fingerprint in self.fingerprints
+            ],
+            "reason": self.reason,
         }
 
-
-INSTALL_COMMANDS = {
-    "npm": (
-        "npm",
-        "ci",
-        "--ignore-scripts",
-        "--no-audit",
-        "--no-fund",
-    ),
-    "pnpm": (
-        "pnpm",
-        "install",
-        "--frozen-lockfile",
-        "--ignore-scripts",
-    ),
-    "yarn": (
-        "yarn",
-        "install",
-        "--ignore-scripts",
-    ),
-    "cargo": (
-        "cargo",
-        "fetch",
-    ),
-    "go": (
-        "go",
-        "mod",
-        "download",
-    ),
-    "composer": (
-        "composer",
-        "install",
-        "--no-interaction",
-        "--no-scripts",
-    ),
-    "poetry": (
-        "poetry",
-        "install",
-        "--no-root",
-        "--no-interaction",
-    ),
-}
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True)
 
 
-def _validate_manager(manager: str) -> str:
-    if not isinstance(manager, str):
+def _repository_root(path: Path) -> Path:
+    root = path.expanduser().resolve()
+
+    if not root.exists():
         raise PackageInstallationValidationError(
-            "manager must be a string"
+            f"repository does not exist: {root}"
         )
 
-    normalized = manager.strip().lower()
-
-    if normalized not in SUPPORTED_MANAGERS:
+    if not root.is_dir():
         raise PackageInstallationValidationError(
-            f"Unsupported package manager: {manager}"
+            f"repository is not a directory: {root}"
+        )
+
+    if not (root / ".git").exists():
+        raise PackageInstallationValidationError(
+            f"not a git repository: {root}"
+        )
+
+    return root
+
+
+def _validate_command(
+    package_manager: str,
+    command: Sequence[str],
+) -> tuple[str, ...]:
+    expected_prefix = SUPPORTED_MANAGERS[package_manager]
+
+    if isinstance(command, (str, bytes)):
+        raise PackageInstallationValidationError(
+            "command must be a sequence, not a string"
+        )
+
+    normalized = tuple(command)
+
+    if not normalized:
+        raise PackageInstallationValidationError("command is empty")
+
+    if normalized[: len(expected_prefix)] != expected_prefix:
+        raise PackageInstallationValidationError(
+            "command does not match package-manager executable"
+        )
+
+    allowed = INSTALL_COMMANDS[package_manager]
+
+    if normalized[: len(allowed)] != allowed:
+        raise PackageInstallationValidationError(
+            f"command is not allowlisted for {package_manager}"
+        )
+
+    dangerous_tokens = {
+        "&&",
+        "||",
+        ";",
+        "|",
+        ">",
+        ">>",
+        "<",
+        "`",
+        "$(",
+    }
+
+    if any(
+        any(token in argument for token in dangerous_tokens)
+        for argument in normalized
+    ):
+        raise PackageInstallationValidationError(
+            "shell metacharacter detected"
         )
 
     return normalized
 
 
-def build_install_command(manager: str) -> tuple[str, ...]:
-    normalized = _validate_manager(manager)
-    return INSTALL_COMMANDS[normalized]
-
-
-def _resolve_workspace(workspace: Path) -> Path:
-    if not isinstance(workspace, Path):
+def build_install_command(
+    package_manager: str,
+) -> tuple[str, ...]:
+    if package_manager not in INSTALL_COMMANDS:
         raise PackageInstallationValidationError(
-            "workspace must be a Path"
+            f"unsupported package manager: {package_manager}"
         )
 
-    try:
-        resolved = workspace.expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise PackageInstallationValidationError(
-            f"Unable to resolve workspace: {workspace}"
-        ) from exc
-
-    if not resolved.is_dir():
-        raise PackageInstallationValidationError(
-            f"Workspace is not a directory: {resolved}"
-        )
-
-    if resolved.is_symlink():
-        raise PackageInstallationValidationError(
-            f"Symlink workspace is not allowed: {resolved}"
-        )
-
-    return resolved
+    return INSTALL_COMMANDS[package_manager]
 
 
-def _find_repository_root(path: Path) -> Path | None:
-    current = path
-
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return candidate
-
-    return None
-
-
-def _validate_timeout(timeout: float) -> None:
-    if isinstance(timeout, bool):
-        raise PackageInstallationValidationError(
-            "Invalid timeout"
-        )
-
-    if not isinstance(timeout, (int, float)):
-        raise PackageInstallationValidationError(
-            "timeout must be numeric"
-        )
-
-    if timeout <= 0 or timeout > 1800:
-        raise PackageInstallationValidationError(
-            "timeout must be greater than 0 and at most 1800 seconds"
-        )
-
-
-def validate_installation_request(
-    request: PackageInstallationRequest,
-) -> Path:
-    if not isinstance(request, PackageInstallationRequest):
-        raise PackageInstallationValidationError(
-            "Invalid installation request"
-        )
-
-    manager = _validate_manager(request.manager)
-    _validate_timeout(request.timeout)
-
-    workspace = _resolve_workspace(request.workspace)
-
-    repository_root = _find_repository_root(workspace)
-
-    if repository_root is not None:
-        if workspace == repository_root:
-            raise PackageInstallationValidationError(
-                "Installation cannot run directly in repository root"
-            )
-
-        try:
-            workspace.relative_to(repository_root)
-        except ValueError:
-            pass
-        else:
-            raise PackageInstallationValidationError(
-                "Installation workspace must not be inside repository"
-            )
-
-    if request.environment:
-        forbidden = {
-            "LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "BASH_ENV",
-            "ENV",
-            "NODE_OPTIONS",
-        }
-
-        for key, value in request.environment.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise PackageInstallationValidationError(
-                    "Environment keys and values must be strings"
-                )
-
-            if key in forbidden:
-                raise PackageInstallationValidationError(
-                    f"Forbidden environment variable: {key}"
-                )
-
-    if manager == "npm":
-        package_json = workspace / "package.json"
-
-        if not package_json.is_file():
-            raise PackageInstallationValidationError(
-                "npm workspace requires package.json"
-            )
-
-        if package_json.is_symlink():
-            raise PackageInstallationValidationError(
-                "package.json symlink is not allowed"
-            )
-
-    return workspace
-
-
-def _build_environment(
-    request: PackageInstallationRequest,
+def _safe_environment(
+    custom_environment: Mapping[str, str],
 ) -> dict[str, str]:
-    environment = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", ""),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "CI": "1",
-        "PYTHONDONTWRITEBYTECODE": "1",
+    result: dict[str, str] = {}
+
+    safe_keys = {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "CI",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_NO_INPUT",
+        "npm_config_audit",
+        "npm_config_fund",
+        "COREPACK_ENABLE_DOWNLOAD_PROMPT",
     }
 
-    forbidden = {
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "BASH_ENV",
-        "ENV",
-        "NODE_OPTIONS",
-    }
+    for key in safe_keys:
+        value = os.environ.get(key)
+        if value is not None:
+            result[key] = value
 
-    if request.environment:
-        for key, value in request.environment.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise PackageInstallationValidationError(
-                    "Environment keys and values must be strings"
-                )
+    for key, value in custom_environment.items():
+        if key.upper() in FORBIDDEN_ENV_KEYS:
+            raise PackageInstallationValidationError(
+                f"secret environment variable is forbidden: {key}"
+            )
+        result[key] = str(value)
 
-            if key in forbidden:
-                raise PackageInstallationValidationError(
-                    f"Forbidden environment variable: {key}"
-                )
+    result["CI"] = "true"
+    result["PIP_NO_INPUT"] = "1"
+    result["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
 
-            environment[key] = value
-
-    return environment
+    return result
 
 
-def execute_package_installation(
-    request: PackageInstallationRequest,
-) -> PackageInstallationResult:
-    workspace = validate_installation_request(request)
-    manager = _validate_manager(request.manager)
-    command = build_install_command(manager)
-    environment = _build_environment(request)
+def _fingerprint(path: Path) -> InstallationFingerprint:
+    digest = hashlib.sha256()
+    size = 0
+
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+
+    return InstallationFingerprint(
+        path=str(path),
+        sha256=digest.hexdigest(),
+        size=size,
+    )
+
+
+def validate_package_manager_available(
+    package_manager: str,
+    timeout: float = 10.0,
+) -> bool:
+    if package_manager not in SUPPORTED_MANAGERS:
+        return False
+
+    command = SUPPORTED_MANAGERS[package_manager]
 
     try:
         completed = subprocess.run(
-            command,
-            cwd=workspace,
-            env=environment,
+            (*command, "--version"),
+            shell=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=False,
+            timeout=timeout,
             check=False,
             close_fds=True,
-            timeout=request.timeout,
         )
-
-    except subprocess.TimeoutExpired as exc:
-        stdout = (
-            exc.stdout.decode(errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        stderr = (
-            exc.stderr.decode(errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else (exc.stderr or "")
-        )
-
-        return PackageInstallationResult(
-            success=False,
-            manager=manager,
-            command=command,
-            returncode=None,
-            stdout=stdout,
-            stderr=stderr,
-            timed_out=True,
-            installed_packages=(),
-            error="PACKAGE_INSTALLATION_TIMEOUT",
-        )
-
-    except OSError as exc:
-        return PackageInstallationResult(
-            success=False,
-            manager=manager,
-            command=command,
-            returncode=None,
-            stdout="",
-            stderr="",
-            timed_out=False,
-            installed_packages=(),
-            error=f"PACKAGE_INSTALLATION_EXECUTION_ERROR: {exc}",
-        )
-
-    if completed.returncode != 0:
-        return PackageInstallationResult(
-            success=False,
-            manager=manager,
-            command=command,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            timed_out=False,
-            installed_packages=(),
-            error="PACKAGE_INSTALLATION_FAILED",
-        )
-
-    return PackageInstallationResult(
-        success=True,
-        manager=manager,
-        command=command,
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        timed_out=False,
-        installed_packages=(),
-        error=None,
-    )
-
-
-def validate_package_installation_result(
-    result: PackageInstallationResult,
-) -> bool:
-    if not isinstance(result, PackageInstallationResult):
+    except (OSError, subprocess.TimeoutExpired):
         return False
 
-    if result.manager not in SUPPORTED_MANAGERS:
+    return completed.returncode == 0
+
+
+def validate_installation_result(
+    result: PackageInstallationValidationResult,
+) -> bool:
+    if not result.success:
+        return False
+
+    if result.exit_code != 0:
         return False
 
     if result.timed_out:
         return False
 
-    if result.success:
-        if result.returncode != 0:
-            return False
-
-        if result.error is not None:
-            return False
-
-    return True
-
-
-def validate_installed_package(
-    package: InstalledPackage,
-) -> bool:
-    if not isinstance(package, InstalledPackage):
+    if result.missing_packages:
         return False
 
-    if not package.name or not package.name.strip():
-        return False
-
-    if not package.version or not package.version.strip():
+    if result.unexpected_packages:
         return False
 
     return True
 
 
-def attach_installed_packages(
-    result: PackageInstallationResult,
-    packages: tuple[InstalledPackage, ...],
-) -> PackageInstallationResult:
-    if not validate_package_installation_result(result):
-        raise PackageInstallationValidationError(
-            "Cannot attach packages to invalid result"
-        )
-
-    if not all(validate_installed_package(item) for item in packages):
-        raise PackageInstallationValidationError(
-            "Invalid installed package"
-        )
-
-    return PackageInstallationResult(
-        success=result.success,
-        manager=result.manager,
-        command=result.command,
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        timed_out=result.timed_out,
-        installed_packages=packages,
-        error=result.error,
+def validate_package_installation(
+    request: PackageInstallationRequest,
+) -> PackageInstallationValidationResult:
+    root = _repository_root(request.repository_root)
+    command = _validate_command(
+        request.package_manager,
+        build_install_command(request.package_manager),
     )
 
+    environment = _safe_environment(request.environment)
 
-__all__ = [
-    "PackageInstallationValidationError",
-    "PackageInstallationRequest",
-    "InstalledPackage",
-    "PackageInstallationResult",
-    "SUPPORTED_MANAGERS",
-    "build_install_command",
-    "validate_installation_request",
-    "execute_package_installation",
-    "validate_package_installation_result",
-    "validate_installed_package",
-    "attach_installed_packages",
-]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=request.timeout,
+            check=False,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as error:
+        return PackageInstallationValidationResult(
+            success=False,
+            package_manager=request.package_manager,
+            command=command,
+            exit_code=None,
+            timed_out=True,
+            stdout=error.stdout or "",
+            stderr=error.stderr or "",
+            expected_packages=request.expected_packages,
+            missing_packages=tuple(
+                package.name for package in request.expected_packages
+            ),
+            unexpected_packages=(),
+            fingerprints=(),
+            reason="INSTALLATION_TIMEOUT",
+        )
+    except OSError as error:
+        return PackageInstallationValidationResult(
+            success=False,
+            package_manager=request.package_manager,
+            command=command,
+            exit_code=None,
+            timed_out=False,
+            stdout="",
+            stderr=str(error),
+            expected_packages=request.expected_packages,
+            missing_packages=tuple(
+                package.name for package in request.expected_packages
+            ),
+            unexpected_packages=(),
+            fingerprints=(),
+            reason="INSTALLATION_EXECUTION_ERROR",
+        )
+
+    fingerprints: list[InstallationFingerprint] = []
+
+    for candidate in (
+        root / "package-lock.json",
+        root / "pnpm-lock.yaml",
+        root / "yarn.lock",
+        root / "Cargo.lock",
+        root / "go.sum",
+        root / "composer.lock",
+        root / "poetry.lock",
+    ):
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                fingerprints.append(_fingerprint(candidate))
+        except OSError:
+            continue
+
+    success = completed.returncode == 0
+
+    return PackageInstallationValidationResult(
+        success=success,
+        package_manager=request.package_manager,
+        command=command,
+        exit_code=completed.returncode,
+        timed_out=False,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        expected_packages=request.expected_packages,
+        missing_packages=(),
+        unexpected_packages=(),
+        fingerprints=tuple(fingerprints),
+        reason=(
+            "INSTALLATION_SUCCESS"
+            if success
+            else "INSTALLATION_COMMAND_FAILED"
+        ),
+    )
