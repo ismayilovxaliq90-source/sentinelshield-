@@ -1,178 +1,274 @@
+from pathlib import Path
 import subprocess
 
+import pytest
+
 from sentinelshield.baseline_snapshot import (
-    BaselineSnapshot,
+    BaselineSnapshotError,
     create_baseline_snapshot,
 )
 
 
-def _git(repo, *args):
+def git(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
-        cwd=repo,
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
         check=True,
+    ).stdout
+
+
+def init_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    git(root, "init")
+    git(root, "config", "user.email", "test@example.com")
+    git(root, "config", "user.name", "Test User")
+
+    return root
+
+
+def commit_initial(root: Path) -> None:
+    git(root, "add", ".")
+    git(root, "commit", "-m", "initial")
+
+
+def test_snapshot_captures_repository_metadata(tmp_path):
+    root = init_repo(tmp_path)
+
+    source = root / "app.py"
+    source.write_text(
+        "print('hello')\n",
+        encoding="utf-8",
     )
 
+    commit_initial(root)
 
-def _init_repo(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    snapshot = create_baseline_snapshot(root)
 
-    _git(repo, "init")
-
-    tracked = repo / "tracked.txt"
-    tracked.write_text("baseline")
-
-    _git(repo, "add", "tracked.txt")
-
-    _git(
-        repo,
-        "-c",
-        "user.name=Task184",
-        "-c",
-        "user.email=task184@example.invalid",
-        "commit",
-        "-m",
-        "baseline",
-    )
-
-    return repo
-
-
-def test_clean_repository_snapshot(tmp_path):
-    repo = _init_repo(tmp_path)
-
-    snapshot = create_baseline_snapshot(repo)
-
-    assert isinstance(snapshot, BaselineSnapshot)
-    assert snapshot.valid is True
-    assert snapshot.repository_root == repo.resolve()
-    assert len(snapshot.head) == 40
+    assert snapshot.repository_root == str(root.resolve())
+    assert snapshot.head
     assert snapshot.branch
-    assert snapshot.reason == "BASELINE_SNAPSHOT_CREATED"
-
-    paths = {
-        item.path
-        for item in snapshot.files
-    }
-
-    assert "tracked.txt" in paths
+    assert any(item.path == "app.py" for item in snapshot.files)
+    assert snapshot.status == ()
 
 
-def test_snapshot_contains_tracked_file_fingerprint(tmp_path):
-    repo = _init_repo(tmp_path)
+def test_snapshot_from_nested_directory(tmp_path):
+    root = init_repo(tmp_path)
 
-    snapshot = create_baseline_snapshot(repo)
-
-    item = next(
-        item
-        for item in snapshot.files
-        if item.path == "tracked.txt"
+    source = root / "src" / "app.py"
+    source.parent.mkdir()
+    source.write_text(
+        "value = 1\n",
+        encoding="utf-8",
     )
 
-    assert item.status == "  "
-    assert item.fingerprint.startswith("FILE:")
-    assert len(item.fingerprint) == 69
+    commit_initial(root)
 
-
-def test_snapshot_captures_preexisting_modified_file(tmp_path):
-    repo = _init_repo(tmp_path)
-
-    tracked = repo / "tracked.txt"
-    tracked.write_text("pre-existing user change")
-
-    snapshot = create_baseline_snapshot(repo)
-
-    item = next(
-        item
-        for item in snapshot.files
-        if item.path == "tracked.txt"
+    snapshot = create_baseline_snapshot(
+        root / "src"
     )
 
-    assert item.status == " M"
-    assert item.fingerprint.startswith("FILE:")
+    assert snapshot.repository_root == str(root.resolve())
+    assert any(item.path == "src/app.py" for item in snapshot.files)
+
+
+def test_snapshot_detects_working_tree_changes(tmp_path):
+    root = init_repo(tmp_path)
+
+    source = root / "app.py"
+    source.write_text(
+        "value = 1\n",
+        encoding="utf-8",
+    )
+
+    commit_initial(root)
+
+    source.write_text(
+        "value = 2\n",
+        encoding="utf-8",
+    )
+
+    snapshot = create_baseline_snapshot(root)
+
+    assert snapshot.status
+    assert any(
+        line.endswith("app.py")
+        for line in snapshot.status
+    )
 
 
 def test_snapshot_captures_untracked_file(tmp_path):
-    repo = _init_repo(tmp_path)
+    root = init_repo(tmp_path)
 
-    new_file = repo / "user.txt"
-    new_file.write_text("user content")
-
-    snapshot = create_baseline_snapshot(repo)
-
-    item = next(
-        item
-        for item in snapshot.files
-        if item.path == "user.txt"
+    tracked = root / "app.py"
+    tracked.write_text(
+        "value = 1\n",
+        encoding="utf-8",
     )
 
-    assert item.status == "??"
-    assert item.fingerprint.startswith("FILE:")
+    commit_initial(root)
+
+    untracked = root / "new.txt"
+    untracked.write_text(
+        "new\n",
+        encoding="utf-8",
+    )
+
+    snapshot = create_baseline_snapshot(root)
+
+    assert any(
+        item.path == "new.txt"
+        for item in snapshot.files
+    )
 
 
-def test_snapshot_fingerprint_changes_when_content_changes(tmp_path):
-    repo = _init_repo(tmp_path)
+def test_snapshot_fingerprint_changes_when_file_changes(tmp_path):
+    root = init_repo(tmp_path)
 
-    tracked = repo / "tracked.txt"
+    source = root / "app.py"
+    source.write_text(
+        "value = 1\n",
+        encoding="utf-8",
+    )
 
-    first = create_baseline_snapshot(repo)
+    commit_initial(root)
+
+    first = create_baseline_snapshot(root)
 
     first_item = next(
         item
         for item in first.files
-        if item.path == "tracked.txt"
+        if item.path == "app.py"
     )
 
-    tracked.write_text("different content")
+    source.write_text(
+        "value = 999\n",
+        encoding="utf-8",
+    )
 
-    second = create_baseline_snapshot(repo)
+    second = create_baseline_snapshot(root)
 
     second_item = next(
         item
         for item in second.files
-        if item.path == "tracked.txt"
+        if item.path == "app.py"
     )
 
-    assert (
-        first_item.fingerprint
-        != second_item.fingerprint
+    assert first_item.fingerprint != second_item.fingerprint
+
+
+def test_snapshot_json_is_serializable(tmp_path):
+    root = init_repo(tmp_path)
+
+    source = root / "app.py"
+    source.write_text(
+        "value = 1\n",
+        encoding="utf-8",
     )
 
+    commit_initial(root)
 
-def test_missing_path_fails_closed(tmp_path):
-    snapshot = create_baseline_snapshot(
-        tmp_path / "missing"
+    snapshot = create_baseline_snapshot(root)
+
+    payload = snapshot.to_json()
+
+    assert '"repository_root"' in payload
+    assert '"head"' in payload
+    assert '"files"' in payload
+
+
+def test_detached_head_is_supported(tmp_path):
+    root = init_repo(tmp_path)
+
+    source = root / "app.py"
+    source.write_text(
+        "value = 1\n",
+        encoding="utf-8",
     )
 
-    assert snapshot.valid is False
-    assert snapshot.reason == "START_PATH_NOT_FOUND"
+    commit_initial(root)
+
+    git(root, "checkout", "--detach", "HEAD")
+
+    snapshot = create_baseline_snapshot(root)
+
+    assert snapshot.head
+    assert snapshot.branch is None
 
 
-def test_non_git_directory_fails_closed(tmp_path):
-    directory = tmp_path / "plain"
-    directory.mkdir()
+def test_invalid_start_path_fails(tmp_path):
+    missing = tmp_path / "missing"
 
-    snapshot = create_baseline_snapshot(directory)
-
-    assert snapshot.valid is False
-    assert snapshot.reason == "NOT_A_GIT_REPOSITORY"
+    with pytest.raises(BaselineSnapshotError):
+        create_baseline_snapshot(missing)
 
 
-def test_snapshot_serialization(tmp_path):
-    repo = _init_repo(tmp_path)
+def test_non_directory_start_path_fails(tmp_path):
+    file_path = tmp_path / "file.txt"
+    file_path.write_text(
+        "data",
+        encoding="utf-8",
+    )
 
-    snapshot = create_baseline_snapshot(repo)
+    with pytest.raises(BaselineSnapshotError):
+        create_baseline_snapshot(file_path)
 
-    payload = snapshot.to_dict()
 
-    assert payload["valid"] is True
-    assert payload["head"] == snapshot.head
-    assert isinstance(payload["files"], list)
+def test_invalid_timeout_fails(tmp_path):
+    root = init_repo(tmp_path)
 
-    json_text = snapshot.to_json()
+    with pytest.raises(ValueError):
+        create_baseline_snapshot(
+            root,
+            timeout=0,
+        )
 
-    assert '"valid": true' in json_text
-    assert snapshot.head in json_text
+
+def test_symlink_fingerprint_is_supported(tmp_path):
+    root = init_repo(tmp_path)
+
+    target = root / "target.txt"
+    target.write_text(
+        "target\n",
+        encoding="utf-8",
+    )
+
+    link = root / "link.txt"
+    link.symlink_to("target.txt")
+
+    git(root, "add", ".")
+    git(root, "commit", "-m", "initial")
+
+    snapshot = create_baseline_snapshot(root)
+
+    link_item = next(
+        item
+        for item in snapshot.files
+        if item.path == "link.txt"
+    )
+
+    assert link_item.kind == "symlink"
+    assert link_item.fingerprint
+
+
+def test_missing_tracked_file_fails_safely(tmp_path):
+    root = init_repo(tmp_path)
+
+    source = root / "app.py"
+    source.write_text(
+        "value = 1\n",
+        encoding="utf-8",
+    )
+
+    commit_initial(root)
+    source.unlink()
+
+    # Git status contains the deleted tracked path. Snapshot creation
+    # must reject a missing tracked file rather than silently accepting it.
+    with pytest.raises(BaselineSnapshotError):
+        create_baseline_snapshot(root)
