@@ -1,0 +1,126 @@
+name: TASK 179 - Package Manager Availability Validation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  task-179:
+    name: TASK 179 - Package Manager Availability Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install pytest on GitHub runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      # ------------------------------------------------------
+      # TASK 179 — REAL SERVER VALIDATION
+      # ------------------------------------------------------
+
+      - name: Validate package manager availability
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=================================================="
+          echo "TASK 179 — PACKAGE MANAGER AVAILABILITY"
+          echo "EXECUTION ENVIRONMENT: GITHUB ACTIONS SERVER"
+          echo "=================================================="
+
+          echo
+          echo "Runner:"
+          echo "OS=${RUNNER_OS}"
+          echo "ARCH=${RUNNER_ARCH}"
+
+          echo
+          echo "Node/npm provided by runner:"
+          node --version
+          npm --version
+
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+
+          python \
+            scripts/task_179_validate_package_manager_availability.py
+
+      # ------------------------------------------------------
+      # TASK 179 — TEST SUITE
+      # ------------------------------------------------------
+
+      - name: Run Task 179 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+
+          python -m pytest \
+            tests/test_package_manager_availability_validation.py \
+            -q
+
+      # ------------------------------------------------------
+      # EVIDENCE
+      # ------------------------------------------------------
+
+      - name: Generate Task 179 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/task-179
+
+          NODE_VERSION="$(node --version)"
+          NPM_VERSION="$(npm --version)"
+          NODE_PATH="$(command -v node)"
+          NPM_PATH="$(command -v npm)"
+
+          {
+            echo "TASK=179"
+            echo "NAME=Package Manager Availability Validation"
+            echo "EXECUTION_ENVIRONMENT=GitHub Actions"
+            echo "RUNNER_OS=${RUNNER_OS}"
+            echo "RUNNER_ARCH=${RUNNER_ARCH}"
+            echo "NODE_VERSION=${NODE_VERSION}"
+            echo "NPM_VERSION=${NPM_VERSION}"
+            echo "NODE_PATH=${NODE_PATH}"
+            echo "NPM_PATH=${NPM_PATH}"
+            echo "JOB_STATUS=${{ job.status }}"
+          } > artifacts/task-179/execution-evidence.txt
+
+          cat artifacts/task-179/execution-evidence.txt
+
+      - name: Upload Task 179 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-179-package-manager-evidence
+          path: artifacts/task-179/
