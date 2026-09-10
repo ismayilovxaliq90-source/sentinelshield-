@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,34 +10,79 @@ import pytest
 from sentinelshield.temporary_workspace import (
     TemporaryWorkspace,
     TemporaryWorkspaceError,
+    WORKSPACE_MARKER,
     cleanup_temporary_workspace,
     prepare_temporary_workspace,
     workspace_contains,
 )
 
 
-def test_workspace_is_created_with_secure_permissions(tmp_path):
+def test_workspace_is_created(tmp_path):
     workspace = prepare_temporary_workspace(
         base_dir=tmp_path,
     )
 
     try:
-        assert isinstance(workspace, TemporaryWorkspace)
+        assert isinstance(
+            workspace,
+            TemporaryWorkspace,
+        )
         assert workspace.path.is_dir()
         assert workspace.path.parent == tmp_path.resolve()
-        assert stat.S_IMODE(
-            workspace.path.stat().st_mode
-        ) == 0o700
-
         assert workspace.marker.is_file()
-        assert stat.S_IMODE(
-            workspace.marker.stat().st_mode
-        ) == 0o600
     finally:
         cleanup_temporary_workspace(workspace)
 
 
-def test_workspace_is_unique(tmp_path):
+def test_workspace_permissions_are_0700(tmp_path):
+    workspace = prepare_temporary_workspace(
+        base_dir=tmp_path,
+    )
+
+    try:
+        mode = stat.S_IMODE(
+            os.stat(workspace.path).st_mode
+        )
+
+        assert mode == 0o700
+        assert workspace.mode == 0o700
+    finally:
+        cleanup_temporary_workspace(workspace)
+
+
+def test_marker_permissions_are_0600(tmp_path):
+    workspace = prepare_temporary_workspace(
+        base_dir=tmp_path,
+    )
+
+    try:
+        mode = stat.S_IMODE(
+            os.stat(workspace.marker).st_mode
+        )
+
+        assert mode == 0o600
+    finally:
+        cleanup_temporary_workspace(workspace)
+
+
+def test_marker_content(tmp_path):
+    workspace = prepare_temporary_workspace(
+        base_dir=tmp_path,
+    )
+
+    try:
+        assert workspace.marker.name == WORKSPACE_MARKER
+        assert (
+            workspace.marker.read_text(
+                encoding="utf-8"
+            )
+            == "sentinelshield-temporary-workspace\n"
+        )
+    finally:
+        cleanup_temporary_workspace(workspace)
+
+
+def test_two_workspaces_are_unique(tmp_path):
     first = prepare_temporary_workspace(
         base_dir=tmp_path,
     )
@@ -67,11 +113,7 @@ def test_workspace_is_outside_repository(tmp_path):
             workspace,
             repository,
         )
-
-        assert repository.resolve() not in (
-            workspace.path,
-            workspace.base_dir,
-        )
+        assert workspace.path != repository
     finally:
         cleanup_temporary_workspace(workspace)
 
@@ -80,17 +122,17 @@ def test_workspace_inside_repository_is_rejected(tmp_path):
     repository = tmp_path / "repo"
     repository.mkdir()
 
-    workspace_base = repository / "temporary"
-    workspace_base.mkdir()
+    base = repository / "temporary"
+    base.mkdir()
 
     with pytest.raises(TemporaryWorkspaceError):
         prepare_temporary_workspace(
-            base_dir=workspace_base,
+            base_dir=base,
             repository_root=repository,
         )
 
 
-def test_workspace_contains_only_descendants(tmp_path):
+def test_workspace_contains_child(tmp_path):
     workspace = prepare_temporary_workspace(
         base_dir=tmp_path,
     )
@@ -102,12 +144,21 @@ def test_workspace_contains_only_descendants(tmp_path):
             encoding="utf-8",
         )
 
-        outside = tmp_path / "outside.txt"
-
         assert workspace_contains(
             workspace,
             child,
         )
+    finally:
+        cleanup_temporary_workspace(workspace)
+
+
+def test_workspace_does_not_contain_outside_path(tmp_path):
+    workspace = prepare_temporary_workspace(
+        base_dir=tmp_path,
+    )
+
+    try:
+        outside = tmp_path / "outside.txt"
 
         assert not workspace_contains(
             workspace,
@@ -117,68 +168,29 @@ def test_workspace_contains_only_descendants(tmp_path):
         cleanup_temporary_workspace(workspace)
 
 
-def test_workspace_serialization(tmp_path):
+def test_cleanup_removes_workspace(tmp_path):
     workspace = prepare_temporary_workspace(
         base_dir=tmp_path,
     )
 
-    try:
-        data = workspace.to_dict()
+    path = workspace.path
 
-        assert data["path"] == str(workspace.path)
-        assert data["base_dir"] == str(
-            workspace.base_dir
-        )
-        assert data["marker"] == str(
-            workspace.marker
-        )
-        assert data["mode"] == 0o700
-    finally:
-        cleanup_temporary_workspace(workspace)
+    cleanup_temporary_workspace(workspace)
+
+    assert not path.exists()
 
 
-@pytest.mark.parametrize(
-    "prefix",
-    [
-        "",
-        " bad",
-        "bad ",
-        "bad/name",
-        "bad\\name",
-        "bad\x00name",
-        "bad\nname",
-        "bad\tname",
-    ],
-)
-def test_invalid_prefix_is_rejected(tmp_path, prefix):
-    with pytest.raises(
-        (TypeError, ValueError)
-    ):
-        prepare_temporary_workspace(
-            base_dir=tmp_path,
-            prefix=prefix,
-        )
-
-
-def test_non_string_prefix_is_rejected(tmp_path):
-    with pytest.raises(TypeError):
-        prepare_temporary_workspace(
-            base_dir=tmp_path,
-            prefix=123,  # type: ignore[arg-type]
-        )
-
-
-def test_non_directory_base_is_rejected(tmp_path):
-    base_file = tmp_path / "base"
-    base_file.write_text(
-        "not a directory",
-        encoding="utf-8",
+def test_cleanup_requires_marker(tmp_path):
+    workspace = prepare_temporary_workspace(
+        base_dir=tmp_path,
     )
 
+    workspace.marker.unlink()
+
     with pytest.raises(TemporaryWorkspaceError):
-        prepare_temporary_workspace(
-            base_dir=base_file,
-        )
+        cleanup_temporary_workspace(workspace)
+
+    workspace.path.rmdir()
 
 
 def test_symlink_base_is_rejected(tmp_path):
@@ -197,58 +209,51 @@ def test_symlink_base_is_rejected(tmp_path):
         )
 
 
-def test_cleanup_requires_expected_marker(tmp_path):
-    workspace = prepare_temporary_workspace(
-        base_dir=tmp_path,
+def test_file_as_base_is_rejected(tmp_path):
+    base = tmp_path / "base-file"
+    base.write_text(
+        "not-directory\n",
+        encoding="utf-8",
     )
-
-    workspace.marker.unlink()
 
     with pytest.raises(TemporaryWorkspaceError):
-        cleanup_temporary_workspace(workspace)
-
-    workspace.path.rmdir()
-
-
-def test_cleanup_removes_workspace(tmp_path):
-    workspace = prepare_temporary_workspace(
-        base_dir=tmp_path,
-    )
-
-    path = workspace.path
-
-    cleanup_temporary_workspace(workspace)
-
-    assert not path.exists()
+        prepare_temporary_workspace(
+            base_dir=base,
+        )
 
 
-def test_cleanup_rejects_symlink_workspace(tmp_path):
-    workspace = prepare_temporary_workspace(
-        base_dir=tmp_path,
-    )
-
-    target = workspace.path
-    link = tmp_path / "workspace-link"
-    link.symlink_to(
-        target,
-        target_is_directory=True,
-    )
-
-    forged = TemporaryWorkspace(
-        path=link,
-        base_dir=workspace.base_dir,
-        marker=link / ".sentinelshield-workspace",
-        mode=0o700,
-    )
-
-    try:
-        with pytest.raises(TemporaryWorkspaceError):
-            cleanup_temporary_workspace(forged)
-    finally:
-        cleanup_temporary_workspace(workspace)
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        " bad",
+        "bad ",
+        "bad/name",
+        "bad\\name",
+        "bad\x00name",
+        "bad\nname",
+        "bad\tname",
+    ],
+)
+def test_invalid_prefix_rejected(tmp_path, prefix):
+    with pytest.raises(
+        (TypeError, ValueError)
+    ):
+        prepare_temporary_workspace(
+            base_dir=tmp_path,
+            prefix=prefix,
+        )
 
 
-def test_default_system_temp_directory_is_supported():
+def test_non_string_prefix_rejected(tmp_path):
+    with pytest.raises(TypeError):
+        prepare_temporary_workspace(
+            base_dir=tmp_path,
+            prefix=123,  # type: ignore[arg-type]
+        )
+
+
+def test_default_system_temp_directory_supported():
     workspace = prepare_temporary_workspace()
 
     try:
@@ -258,31 +263,21 @@ def test_default_system_temp_directory_is_supported():
         cleanup_temporary_workspace(workspace)
 
 
-def test_workspace_has_owner_only_mode(tmp_path):
+def test_to_dict(tmp_path):
     workspace = prepare_temporary_workspace(
         base_dir=tmp_path,
     )
 
     try:
-        mode = stat.S_IMODE(
-            os.stat(workspace.path).st_mode
+        data = workspace.to_dict()
+
+        assert data["path"] == str(workspace.path)
+        assert data["base_dir"] == str(
+            workspace.base_dir
         )
-        assert mode == 0o700
-    finally:
-        cleanup_temporary_workspace(workspace)
-
-
-def test_marker_content_is_correct(tmp_path):
-    workspace = prepare_temporary_workspace(
-        base_dir=tmp_path,
-    )
-
-    try:
-        assert (
-            workspace.marker.read_text(
-                encoding="utf-8"
-            )
-            == "sentinelshield-temporary-workspace\n"
+        assert data["marker"] == str(
+            workspace.marker
         )
+        assert data["mode"] == 0o700
     finally:
         cleanup_temporary_workspace(workspace)

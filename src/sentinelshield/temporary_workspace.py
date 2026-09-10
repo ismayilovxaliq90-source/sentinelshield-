@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import secrets
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -12,8 +11,8 @@ class TemporaryWorkspaceError(RuntimeError):
     """Raised when a secure temporary workspace cannot be prepared."""
 
 
-_WORKSPACE_MARKER = ".sentinelshield-workspace"
-_DEFAULT_PREFIX = "sentinelshield-"
+WORKSPACE_MARKER = ".sentinelshield-workspace"
+DEFAULT_PREFIX = "sentinelshield-"
 
 
 @dataclass(frozen=True)
@@ -51,17 +50,23 @@ def _validate_prefix(prefix: str) -> str:
     if not prefix:
         raise ValueError("prefix must not be empty")
 
-    if prefix.strip() != prefix:
-        raise ValueError("prefix must not have surrounding whitespace")
+    if prefix != prefix.strip():
+        raise ValueError(
+            "prefix must not have surrounding whitespace"
+        )
 
     if any(
-        character in prefix
-        for character in ("\x00", "\n", "\r", "\t")
+        char in prefix
+        for char in ("\x00", "\n", "\r", "\t")
     ):
-        raise ValueError("prefix contains forbidden control characters")
+        raise ValueError(
+            "prefix contains forbidden control characters"
+        )
 
     if "/" in prefix or "\\" in prefix:
-        raise ValueError("prefix must not contain path separators")
+        raise ValueError(
+            "prefix must not contain path separators"
+        )
 
     if len(prefix) > 64:
         raise ValueError("prefix is too long")
@@ -74,14 +79,14 @@ def _validate_base_dir(base_dir: Path) -> Path:
 
     try:
         if base.exists():
-            if not base.is_dir():
-                raise TemporaryWorkspaceError(
-                    f"Base directory is not a directory: {base}"
-                )
-
             if base.is_symlink():
                 raise TemporaryWorkspaceError(
                     f"Base directory must not be a symlink: {base}"
+                )
+
+            if not base.is_dir():
+                raise TemporaryWorkspaceError(
+                    f"Base directory is not a directory: {base}"
                 )
 
             return base
@@ -92,6 +97,8 @@ def _validate_base_dir(base_dir: Path) -> Path:
             mode=0o700,
         )
 
+    except TemporaryWorkspaceError:
+        raise
     except FileExistsError as exc:
         raise TemporaryWorkspaceError(
             f"Base directory creation collision: {base}"
@@ -104,7 +111,7 @@ def _validate_base_dir(base_dir: Path) -> Path:
     return _canonical(base)
 
 
-def _assert_not_repository_child(
+def _assert_outside_repository(
     workspace: Path,
     repository_root: Path | None,
 ) -> None:
@@ -123,13 +130,13 @@ def _assert_not_repository_child(
     )
 
 
-def _secure_directory(path: Path) -> None:
+def _secure_workspace(path: Path) -> int:
     try:
         os.chmod(path, 0o700)
         mode = stat.S_IMODE(path.stat().st_mode)
     except OSError as exc:
         raise TemporaryWorkspaceError(
-            f"Unable to secure workspace permissions: {path}"
+            f"Unable to secure workspace: {path}"
         ) from exc
 
     if mode != 0o700:
@@ -137,31 +144,27 @@ def _secure_directory(path: Path) -> None:
             f"Workspace permissions are not 0700: {oct(mode)}"
         )
 
+    return mode
+
 
 def _create_marker(path: Path) -> Path:
-    marker = path / _WORKSPACE_MARKER
+    marker = path / WORKSPACE_MARKER
 
     try:
-        flags = (
-            os.O_WRONLY
-            | os.O_CREAT
-            | os.O_EXCL
-        )
-
-        descriptor = os.open(
+        fd = os.open(
             marker,
-            flags,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
             0o600,
         )
 
         with os.fdopen(
-            descriptor,
+            fd,
             "w",
             encoding="utf-8",
         ) as handle:
-            handle.write("sentinelshield-temporary-workspace\n")
-
-        return marker
+            handle.write(
+                "sentinelshield-temporary-workspace\n"
+            )
 
     except FileExistsError as exc:
         raise TemporaryWorkspaceError(
@@ -172,34 +175,28 @@ def _create_marker(path: Path) -> Path:
             f"Unable to create workspace marker: {marker}"
         ) from exc
 
+    return marker
+
 
 def prepare_temporary_workspace(
     base_dir: str | os.PathLike[str] | None = None,
     *,
-    prefix: str = _DEFAULT_PREFIX,
+    prefix: str = DEFAULT_PREFIX,
     repository_root: str | os.PathLike[str] | None = None,
 ) -> TemporaryWorkspace:
     """
-    Prepare a private temporary workspace.
+    Create a private, unique temporary workspace.
 
-    No repository files are modified. The workspace is created outside the
-    repository and is restricted to owner-only access.
+    The workspace is created atomically by tempfile.mkdtemp(),
+    restricted to owner-only access, and must remain outside
+    the repository root when one is supplied.
     """
     validated_prefix = _validate_prefix(prefix)
 
     if base_dir is None:
-        try:
-            base = _canonical(
-                Path(tempfile.gettempdir())
-            )
-        except Exception as exc:
-            raise TemporaryWorkspaceError(
-                "Unable to determine system temporary directory"
-            ) from exc
+        base = _canonical(Path(tempfile.gettempdir()))
     else:
-        base = _validate_base_dir(
-            Path(base_dir)
-        )
+        base = _validate_base_dir(Path(base_dir))
 
     repository = (
         _canonical(Path(repository_root))
@@ -207,10 +204,8 @@ def prepare_temporary_workspace(
         else None
     )
 
-    # mkdtemp uses an atomic creation operation and therefore avoids the
-    # classic check-then-create collision problem.
     try:
-        workspace_text = tempfile.mkdtemp(
+        raw_path = tempfile.mkdtemp(
             prefix=validated_prefix,
             dir=str(base),
         )
@@ -219,24 +214,12 @@ def prepare_temporary_workspace(
             f"Unable to create temporary workspace in {base}"
         ) from exc
 
-    workspace = _canonical(
-        Path(workspace_text)
-    )
+    workspace = _canonical(Path(raw_path))
 
     try:
-        _assert_not_repository_child(
-            workspace,
-            repository,
-        )
-
-        if workspace == base:
-            raise TemporaryWorkspaceError(
-                "Workspace path must differ from base directory"
-            )
-
         if workspace.is_symlink():
             raise TemporaryWorkspaceError(
-                "Temporary workspace unexpectedly became a symlink"
+                "Temporary workspace must not be a symlink"
             )
 
         if not workspace.is_dir():
@@ -244,24 +227,30 @@ def prepare_temporary_workspace(
                 "Temporary workspace is not a directory"
             )
 
-        _secure_directory(workspace)
+        if workspace == base:
+            raise TemporaryWorkspaceError(
+                "Workspace path must differ from base directory"
+            )
 
+        _assert_outside_repository(
+            workspace,
+            repository,
+        )
+
+        mode = _secure_workspace(workspace)
         marker = _create_marker(workspace)
 
         try:
             os.chmod(marker, 0o600)
+            marker_mode = stat.S_IMODE(marker.stat().st_mode)
         except OSError as exc:
             raise TemporaryWorkspaceError(
-                f"Unable to secure marker permissions: {marker}"
+                f"Unable to secure workspace marker: {marker}"
             ) from exc
-
-        marker_mode = stat.S_IMODE(
-            marker.stat().st_mode
-        )
 
         if marker_mode != 0o600:
             raise TemporaryWorkspaceError(
-                f"Marker permissions are not 0600: "
+                f"Workspace marker permissions are not 0600: "
                 f"{oct(marker_mode)}"
             )
 
@@ -269,69 +258,33 @@ def prepare_temporary_workspace(
             path=workspace,
             base_dir=base,
             marker=marker,
-            mode=0o700,
+            mode=mode,
         )
 
     except Exception:
-        # Best-effort cleanup only for a workspace created by this function.
         try:
+            marker = workspace / WORKSPACE_MARKER
+
+            if marker.exists() or marker.is_symlink():
+                marker.unlink()
+
             if workspace.exists() and workspace.is_dir():
-                marker = workspace / _WORKSPACE_MARKER
-                if marker.exists() or marker.is_symlink():
-                    marker.unlink(missing_ok=True)
                 workspace.rmdir()
+
         except OSError:
             pass
 
         raise
 
 
-def cleanup_temporary_workspace(
-    workspace: TemporaryWorkspace,
-) -> None:
-    """
-    Safely remove a workspace created by prepare_temporary_workspace.
-
-    Removal is permitted only when the expected marker is present.
-    """
-    if not isinstance(workspace, TemporaryWorkspace):
-        raise TypeError(
-            "workspace must be a TemporaryWorkspace"
-        )
-
-    path = _canonical(workspace.path)
-    marker = path / _WORKSPACE_MARKER
-
-    if path.is_symlink():
-        raise TemporaryWorkspaceError(
-            "Refusing to clean a symlink workspace"
-        )
-
-    if not path.is_dir():
-        raise TemporaryWorkspaceError(
-            f"Workspace directory does not exist: {path}"
-        )
-
-    if not marker.is_file() or marker.is_symlink():
-        raise TemporaryWorkspaceError(
-            "Refusing cleanup: workspace marker is missing or invalid"
-        )
-
-    try:
-        marker.unlink()
-        path.rmdir()
-    except OSError as exc:
-        raise TemporaryWorkspaceError(
-            f"Unable to clean temporary workspace: {path}"
-        ) from exc
-
-
 def workspace_contains(
     workspace: TemporaryWorkspace,
     candidate: str | os.PathLike[str],
 ) -> bool:
-    """Return True only when candidate is physically under workspace."""
-    if not isinstance(workspace, TemporaryWorkspace):
+    if not isinstance(
+        workspace,
+        TemporaryWorkspace,
+    ):
         raise TypeError(
             "workspace must be a TemporaryWorkspace"
         )
@@ -345,3 +298,41 @@ def workspace_contains(
         return False
 
     return True
+
+
+def cleanup_temporary_workspace(
+    workspace: TemporaryWorkspace,
+) -> None:
+    if not isinstance(
+        workspace,
+        TemporaryWorkspace,
+    ):
+        raise TypeError(
+            "workspace must be a TemporaryWorkspace"
+        )
+
+    path = _canonical(workspace.path)
+    marker = path / WORKSPACE_MARKER
+
+    if path.is_symlink():
+        raise TemporaryWorkspaceError(
+            "Refusing cleanup of symlink workspace"
+        )
+
+    if not path.is_dir():
+        raise TemporaryWorkspaceError(
+            f"Workspace directory does not exist: {path}"
+        )
+
+    if not marker.is_file() or marker.is_symlink():
+        raise TemporaryWorkspaceError(
+            "Refusing cleanup: invalid workspace marker"
+        )
+
+    try:
+        marker.unlink()
+        path.rmdir()
+    except OSError as exc:
+        raise TemporaryWorkspaceError(
+            f"Unable to clean temporary workspace: {path}"
+        ) from exc
