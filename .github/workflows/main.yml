@@ -1,0 +1,18 @@
+name: Terminal olmadan Kod Yoxla
+
+on:
+  workflow_dispatch:
+    inputs:
+      my_code:
+        description: 'Yoxlamaq istədiyiniz kodu bura yapışdırın'
+        required: true
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Python kodunu icra et
+        run: |
+          echo "${{ inputs.my_code }}" > script.py
+          python script.py
