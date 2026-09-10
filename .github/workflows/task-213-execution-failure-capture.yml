@@ -1,0 +1,131 @@
+name: TASK 213 - Execution Failure Capture
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  task-213:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify project layout and import
+        run: |
+          set -euo pipefail
+
+          test -d "$GITHUB_WORKSPACE/src/sentinelshield"
+          test -f "$GITHUB_WORKSPACE/src/sentinelshield/execution_failure_capture.py"
+          test -f "$GITHUB_WORKSPACE/tests/test_execution_failure_capture.py"
+
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -c "import sentinelshield; print(sentinelshield.__file__)"
+          python -c "from sentinelshield.execution_failure_capture import capture_execution_failure"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check --no-input pytest
+
+      - name: Run TASK 213 unit tests
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -m pytest \
+            -q \
+            "$GITHUB_WORKSPACE/tests/test_execution_failure_capture.py"
+
+      - name: Live failure capture validation
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          import sys
+
+          from sentinelshield.execution_failure_capture import (
+              capture_execution_result,
+              validate_execution_failure,
+          )
+
+          result = capture_execution_result(
+              [
+                  sys.executable,
+                  "-c",
+                  "import sys; sys.exit(17)",
+              ],
+              return_code=17,
+              stderr="intentional test failure",
+          )
+
+          print("category:", result.failure.category)
+          print("return_code:", result.failure.return_code)
+          print("failed:", result.failed)
+
+          assert result.failure.category == "NON_ZERO_EXIT"
+          assert result.failure.return_code == 17
+          assert result.failed is True
+          assert validate_execution_failure(result)
+
+          print("TASK 213 LIVE VALIDATION: PASS")
+          PY
+
+      - name: Live exception capture validation
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python - <<'PY'
+          from sentinelshield.execution_failure_capture import (
+              capture_exception,
+              validate_execution_failure,
+          )
+
+          result = capture_exception(
+              ["sentinelshield-test-command"],
+              RuntimeError("intentional exception"),
+          )
+
+          print("category:", result.failure.category)
+          print("exception_type:", result.failure.exception_type)
+
+          assert result.failure.category == "UNEXPECTED_EXCEPTION"
+          assert result.failure.exception_type == "RuntimeError"
+          assert validate_execution_failure(result)
+
+          print("TASK 213 EXCEPTION VALIDATION: PASS")
+          PY
+
+      - name: Verify no bytecode changes
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain -- '*.pyc' '*.pyo' | grep -q .; then
+            echo "TASK 213 FAIL: Python bytecode changed"
+            git status --porcelain -- '*.pyc' '*.pyo'
+            exit 1
+          fi
+
+          echo "TASK 213 BYTECODE CHECK: PASS"
+
+      - name: Final status
+        run: |
+          echo "TASK 213 SERVER VALIDATION COMPLETE"
