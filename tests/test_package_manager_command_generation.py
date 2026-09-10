@@ -9,70 +9,117 @@ from sentinelshield.package_manager_command_generation import (
 
 
 @pytest.mark.parametrize(
-    ("ecosystem", "manager", "package", "version", "expected"),
+    (
+        "ecosystem",
+        "manager",
+        "package",
+        "version",
+        "expected",
+    ),
     [
         (
             "python",
             "pip",
             "requests",
             "2.32.4",
-            ("python3", "-m", "pip", "install", "requests==2.32.4"),
+            (
+                "python3",
+                "-m",
+                "pip",
+                "install",
+                "requests==2.32.4",
+            ),
         ),
         (
             "python",
             "poetry",
             "requests",
             "2.32.4",
-            ("poetry", "add", "requests@2.32.4"),
+            (
+                "poetry",
+                "add",
+                "requests@2.32.4",
+            ),
         ),
         (
             "python",
             "pipenv",
             "requests",
             "2.32.4",
-            ("pipenv", "install", "requests==2.32.4"),
+            (
+                "pipenv",
+                "install",
+                "requests==2.32.4",
+            ),
         ),
         (
             "node",
             "npm",
             "lodash",
             "4.17.21",
-            ("npm", "install", "lodash@4.17.21"),
+            (
+                "npm",
+                "install",
+                "lodash@4.17.21",
+            ),
         ),
         (
             "node",
             "yarn",
             "lodash",
             "4.17.21",
-            ("yarn", "add", "lodash@4.17.21"),
+            (
+                "yarn",
+                "add",
+                "lodash@4.17.21",
+            ),
         ),
         (
             "node",
             "pnpm",
             "lodash",
             "4.17.21",
-            ("pnpm", "add", "lodash@4.17.21"),
+            (
+                "pnpm",
+                "add",
+                "lodash@4.17.21",
+            ),
         ),
         (
             "rust",
             "cargo",
             "serde",
             "1.0.219",
-            ("cargo", "update", "-p", "serde", "--precise", "1.0.219"),
+            (
+                "cargo",
+                "update",
+                "-p",
+                "serde",
+                "--precise",
+                "1.0.219",
+            ),
         ),
         (
             "php",
             "composer",
             "monolog/monolog",
             "3.9.0",
-            ("composer", "require", "monolog/monolog:3.9.0"),
+            (
+                "composer",
+                "require",
+                "monolog/monolog:3.9.0",
+            ),
         ),
         (
             "ruby",
             "bundle",
             "rails",
             None,
-            ("bundle", "update", "rails"),
+            (
+                "bundle",
+                "update",
+                "rails",
+            ),
         ),
         (
             "dotnet",
@@ -123,17 +170,35 @@ def test_supported_manager_generates_expected_vector(
     assert result.executed is False
 
 
-def test_command_is_immutable_and_structured():
+@pytest.mark.parametrize(
+    ("ecosystem", "manager", "package"),
+    [
+        ("python", "pip", "requests"),
+        ("node", "npm", "lodash"),
+        ("rust", "cargo", "serde"),
+        ("php", "composer", "monolog/monolog"),
+    ],
+)
+def test_generation_never_marks_command_as_executed(
+    ecosystem,
+    manager,
+    package,
+):
+    version = "1.0.0"
+
+    if manager == "cargo":
+        version = "1.0.219"
+
     result = generate_package_manager_command(
-        "python",
-        "pip",
-        "requests",
-        "2.32.4",
+        ecosystem,
+        manager,
+        package,
+        version,
     )
 
+    assert result.executed is False
     assert isinstance(result.command, tuple)
     assert isinstance(result.arguments, tuple)
-    assert result.to_dict()["executed"] is False
 
 
 @pytest.mark.parametrize(
@@ -193,7 +258,10 @@ def test_malicious_version_is_rejected(value):
         ("php", "npm"),
     ],
 )
-def test_unsupported_manager_is_rejected(ecosystem, manager):
+def test_unsupported_manager_is_rejected(
+    ecosystem,
+    manager,
+):
     with pytest.raises(PackageManagerCommandGenerationError):
         generate_package_manager_command(
             ecosystem,
@@ -265,7 +333,20 @@ def test_policy_can_disable_prereleases():
         )
 
 
-def test_require_wrapper_returns_same_safe_result():
+def test_policy_rejects_invalid_limits():
+    with pytest.raises(PackageManagerCommandGenerationError):
+        generate_package_manager_command(
+            "python",
+            "pip",
+            "requests",
+            "1.0.0",
+            policy=PackageManagerCommandPolicy(
+                max_package_length=0,
+            ),
+        )
+
+
+def test_require_wrapper_is_safe():
     result = require_package_manager_command(
         "node",
         "npm",
@@ -281,7 +362,7 @@ def test_require_wrapper_returns_same_safe_result():
     assert result.executed is False
 
 
-def test_generation_does_not_execute():
+def test_to_dict_contains_generation_state():
     result = generate_package_manager_command(
         "python",
         "pip",
@@ -289,5 +370,13 @@ def test_generation_does_not_execute():
         "2.32.4",
     )
 
-    assert result.executed is False
-    assert result.command[0] == "python3"
+    data = result.to_dict()
+
+    assert data["command"] == (
+        "python3",
+        "-m",
+        "pip",
+        "install",
+        "requests==2.32.4",
+    )
+    assert data["executed"] is False
