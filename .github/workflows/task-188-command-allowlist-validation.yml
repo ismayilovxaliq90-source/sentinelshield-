@@ -22,71 +22,118 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up Python
+      - name: Set Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Install pytest
+      - name: Install test dependency
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: Verify Task 188 test file
+      - name: Verify source import path
         run: |
-          test -f tests/test_command_allowlist_validation.py
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.command_allowlist_validation"
 
-      - name: Run ONLY Task 188 tests
+      - name: Run Task 188 tests
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_command_allowlist_validation.py
 
-      - name: Task 188 live validation
+      - name: Live allowlist validation
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python - <<'PY'
           from sentinelshield.command_allowlist_validation import (
-              CommandAllowlistPolicy,
               validate_command_allowlist,
           )
 
-          policy = CommandAllowlistPolicy({"git", "python"})
+          print("=== TASK 188 LIVE VALIDATION ===")
 
           allowed = validate_command_allowlist(
-              ["git", "status"],
-              policy,
+              ["python", "--version"]
           )
 
-          assert allowed.allowed is True
-          assert allowed.executable == "git"
-          assert allowed.reason == "COMMAND_ALLOWED"
+          print("allowed command:", allowed.to_dict())
 
-          denied = validate_command_allowlist(
-              ["rm", "-rf", "/"],
-              policy,
+          if not allowed.allowed:
+              raise RuntimeError(
+                  f"TASK 188 FAIL: allowlisted command rejected: "
+                  f"{allowed.reason}"
+              )
+
+          rejected = validate_command_allowlist(
+              ["curl", "https://example.com"]
           )
 
-          assert denied.allowed is False
-          assert denied.executable == "rm"
-          assert denied.reason == "EXECUTABLE_NOT_ALLOWED"
+          print("rejected command:", rejected.to_dict())
 
-          print("TASK 188 LIVE VALIDATION PASS")
+          if rejected.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: non-allowlisted executable accepted"
+              )
+
+          shell_string = validate_command_allowlist(
+              "python -c 'print(1)'"
+          )
+
+          print("shell string:", shell_string.to_dict())
+
+          if shell_string.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: shell command string accepted"
+              )
+
+          shell_expression = validate_command_allowlist(
+              ["python;rm"]
+          )
+
+          print("shell expression:", shell_expression.to_dict())
+
+          if shell_expression.allowed:
+              raise RuntimeError(
+                  "TASK 188 FAIL: shell expression accepted"
+              )
+
+          print("TASK 188 PASS: command allowlist enforced")
           PY
 
-      - name: Verify no bytecode changes
+      - name: Verify no Python bytecode changes
         run: |
-          if git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo' | grep -q .; then
-            echo "TASK 188 FAIL: bytecode changes detected"
-            git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo'
+          if git status --porcelain=v1 --untracked-files=all -- \
+              '*.pyc' '*.pyo' | grep -q .; then
+            echo "TASK 188 FAIL: Python bytecode changes detected"
+            git status --short
             exit 1
           fi
 
-          echo "BYTECODE CHECK PASS"
+          echo "TASK 188 PASS: no Python bytecode changes"
 
-      - name: Task 188 PASS
+      - name: Verify repository changes are limited to expected Task 188 files
         run: |
-          echo "========================================"
-          echo "TASK 188 — COMMAND ALLOWLIST VALIDATION"
-          echo "PASS"
-          echo "========================================"
+          unexpected="$(
+            git status --porcelain=v1 --untracked-files=all |
+            awk '
+              {
+                path=$0
+                sub(/^.. /, "", path)
+                if (
+                  path != "src/sentinelshield/command_allowlist_validation.py" &&
+                  path != "tests/test_command_allowlist_validation.py" &&
+                  path != ".github/workflows/task-188-command-allowlist-validation.yml"
+                ) print path
+              }
+            '
+          )"
+
+          if [ -n "$unexpected" ]; then
+            echo "TASK 188 FAIL: unexpected repository changes detected"
+            printf '%s\n' "$unexpected"
+            git status --short
+            exit 1
+          fi
+
+          echo "TASK 188 PASS: repository change scope is clean"
