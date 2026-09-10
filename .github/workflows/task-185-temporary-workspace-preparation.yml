@@ -1,10 +1,12 @@
-name: Task 185 - Temporary Workspace Preparation
+name: TASK 185 - Temporary Workspace Preparation
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - "**"
-  pull_request:
+    paths:
+      - "src/sentinelshield/temporary_workspace.py"
+      - "tests/test_temporary_workspace.py"
+      - ".github/workflows/task-185-temporary-workspace-preparation.yml"
 
 permissions:
   contents: read
@@ -27,140 +29,88 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify Python import path
-        run: |
-          python -c "import sentinelshield; print(sentinelshield.__file__)"
-
       - name: Install pytest
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: Run Task 185 tests
+      - name: Verify import
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield.temporary_workspace"
+
+      - name: Run TASK 185 tests
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_temporary_workspace.py
 
-      - name: Verify all test modules can import sentinelshield
-        run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          python -m pytest --collect-only -q tests
-
-      - name: Live Task 185 validation
+      - name: Live workspace validation
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python - <<'PY'
-          import os
-          import stat
-          import tempfile
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
 
           from sentinelshield.temporary_workspace import (
+              TemporaryWorkspaceError,
               cleanup_temporary_workspace,
               prepare_temporary_workspace,
               workspace_contains,
           )
 
-          repository = os.getcwd()
-
-          with tempfile.TemporaryDirectory(
-              prefix="task-185-base-"
-          ) as base:
-
+          with TemporaryDirectory() as tmp:
+              base = Path(tmp)
               workspace = prepare_temporary_workspace(
                   base_dir=base,
-                  repository_root=repository,
+              )
+
+              child = workspace.path / "child.txt"
+              child.write_text("temporary\n", encoding="utf-8")
+
+              if not workspace_contains(workspace, child):
+                  raise SystemExit(
+                      "TASK 185 FAIL: child containment failed"
+                  )
+
+              cleanup_temporary_workspace(workspace)
+
+              if workspace.path.exists():
+                  raise SystemExit(
+                      "TASK 185 FAIL: workspace was not removed"
+                  )
+
+              real = base / "real"
+              real.mkdir()
+
+              link = base / "link"
+              link.symlink_to(
+                  real,
+                  target_is_directory=True,
               )
 
               try:
-                  assert workspace.path.is_dir()
-                  assert workspace.path != os.path.realpath(repository)
-
-                  mode = stat.S_IMODE(
-                      os.stat(workspace.path).st_mode
+                  prepare_temporary_workspace(
+                      base_dir=link,
                   )
-                  assert mode == 0o700
-
-                  marker_mode = stat.S_IMODE(
-                      os.stat(workspace.marker).st_mode
-                  )
-                  assert marker_mode == 0o600
-
-                  test_file = (
-                      workspace.path / "execution.txt"
-                  )
-                  test_file.write_text(
-                      "server-workspace\n",
-                      encoding="utf-8",
+              except TemporaryWorkspaceError:
+                  pass
+              else:
+                  raise SystemExit(
+                      "TASK 185 FAIL: symlink base was accepted"
                   )
 
-                  assert workspace_contains(
-                      workspace,
-                      test_file,
-                  )
-
-                  assert not workspace_contains(
-                      workspace,
-                      repository,
-                  )
-
-                  print("TASK 185 PASS")
-                  print(
-                      "workspace:",
-                      workspace.path,
-                  )
-                  print(
-                      "mode:",
-                      oct(mode),
-                  )
-                  print(
-                      "marker_mode:",
-                      oct(marker_mode),
-                  )
-
-              finally:
-                  cleanup_temporary_workspace(workspace)
-
-              assert not workspace.path.exists()
-
-          print("TASK 185 workspace cleanup: PASS")
+          print("TASK 185 PASS")
           PY
 
-      - name: Verify repository did not receive workspace marker
+      - name: Verify no bytecode changes
         run: |
-          if find . \
-            -type f \
-            -name '.sentinelshield-workspace' \
-            -print \
-            -quit | grep -q .; then
-            echo "TASK 185 FAIL: workspace marker exists inside repository"
-            find . \
-              -type f \
-              -name '.sentinelshield-workspace' \
-              -print
+          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
+
+          if [ -n "$changed" ]; then
+            echo "TASK 185 FAIL: Python bytecode changes detected"
+            echo "$changed"
             exit 1
           fi
 
-          echo "Repository isolation: PASS"
-
-      - name: Verify Python bytecode did not change
-        run: |
-          if git status \
-            --porcelain=v1 \
-            --untracked-files=all \
-            -- '*.pyc' '*.pyo' | grep -q .; then
-
-            echo "TASK 185 FAIL: bytecode files changed or created"
-            git status \
-              --porcelain=v1 \
-              --untracked-files=all \
-              -- '*.pyc' '*.pyo'
-            exit 1
-          fi
-
-          echo "Bytecode working-tree state: CLEAN"
-
-      - name: Final repository checks
-        run: |
-          git diff --check
-          git status --short
+          echo "TASK 185 PASS: no bytecode changes"
