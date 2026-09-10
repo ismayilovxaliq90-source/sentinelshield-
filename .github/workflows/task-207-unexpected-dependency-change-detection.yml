@@ -1,0 +1,111 @@
+name: TASK 207 - Unexpected Dependency Change Detection
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/sentinelshield/unexpected_dependency_change_detection.py"
+      - "tests/test_unexpected_dependency_change_detection.py"
+      - ".github/workflows/task-207-unexpected-dependency-change-detection.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  task-207:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Verify module import
+        run: |
+          python -c "import sentinelshield.unexpected_dependency_change_detection"
+
+      - name: Run TASK 207 tests
+        run: |
+          python -m pytest -q tests/test_unexpected_dependency_change_detection.py
+
+      - name: Run isolated live validation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tempfile
+
+          from sentinelshield.unexpected_dependency_change_detection import (
+              ApprovedDependencyChange,
+              DependencyState,
+              UnexpectedDependencyChangeRequest,
+              detect_unexpected_dependency_changes,
+          )
+
+          with tempfile.TemporaryDirectory() as temporary:
+              root = Path(temporary) / "fixture"
+              root.mkdir()
+              (root / ".git").mkdir()
+
+              baseline = (
+                  DependencyState("requests", "2.31.0"),
+                  DependencyState("urllib3", "2.2.2"),
+              )
+
+              current = (
+                  DependencyState("requests", "2.32.0"),
+                  DependencyState("urllib3", "2.2.2"),
+              )
+
+              approved = (
+                  ApprovedDependencyChange(
+                      name="requests",
+                      old_version="2.31.0",
+                      new_version="2.32.0",
+                      change_type="update",
+                  ),
+              )
+
+              request = UnexpectedDependencyChangeRequest(
+                  repository_root=root,
+                  baseline=baseline,
+                  current=current,
+                  approved_changes=approved,
+              )
+
+              result = detect_unexpected_dependency_changes(request)
+
+              assert result.valid is True
+              assert result.unexpected_added == ()
+              assert result.unexpected_removed == ()
+              assert result.unexpected_updated == ()
+
+              print("TASK 207 LIVE VALIDATION: PASS")
+          PY
+
+      - name: Verify repository diff formatting
+        run: |
+          git diff --check
+
+      - name: Verify no changed bytecode
+        run: |
+          if git status --porcelain | grep -E '(^|/)(__pycache__/|.*\.pyc$)'; then
+            echo "TASK 207 FAIL: bytecode changes detected"
+            exit 1
+          fi
+
+      - name: TASK 207 PASS
+        run: |
+          echo "TASK 207 PASS: unexpected dependency change detection completed on GitHub runner"
