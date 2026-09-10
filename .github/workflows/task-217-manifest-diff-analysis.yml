@@ -1,7 +1,6 @@
-name: TASK 217 - Manifest Diff Analysis
+name: Task 217 - Manifest Diff Analysis
 
 on:
-  workflow_dispatch:
   push:
     paths:
       - "src/sentinelshield/manifest_diff_analysis.py"
@@ -12,6 +11,7 @@ on:
       - "src/sentinelshield/manifest_diff_analysis.py"
       - "tests/test_manifest_diff_analysis.py"
       - ".github/workflows/task-217-manifest-diff-analysis.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,12 +22,11 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
-  task-217-only:
-    name: TASK 217 ONLY
+  task-217:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Setup Python
@@ -35,14 +34,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pytest
-        run: |
-          python -m pip install \
-            --disable-pip-version-check \
-            --no-cache-dir \
-            pytest
-
-      - name: Validate TASK 217 syntax
+      - name: Validate Python syntax without bytecode writes
         shell: bash
         run: |
           set -euo pipefail
@@ -54,29 +46,20 @@ jobs:
           from pathlib import Path
 
           files = [
-              Path(
-                  "src/sentinelshield/"
-                  "manifest_diff_analysis.py"
-              ),
-              Path(
-                  "tests/"
-                  "test_manifest_diff_analysis.py"
-              ),
+              Path("src/sentinelshield/manifest_diff_analysis.py"),
+              Path("tests/test_manifest_diff_analysis.py"),
           ]
 
           for path in files:
               ast.parse(
-                  path.read_text(
-                      encoding="utf-8"
-                  ),
+                  path.read_text(encoding="utf-8"),
                   filename=str(path),
               )
-              print(
-                  f"SYNTAX PASS: {path}"
-              )
+
+          print("TASK 217 AST SYNTAX: PASS")
           PY
 
-      - name: Validate TASK 217 import
+      - name: Validate import
         shell: bash
         run: |
           set -euo pipefail
@@ -84,26 +67,34 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python -B - <<'PY'
-          import sentinelshield.manifest_diff_analysis as m
+          import sentinelshield.manifest_diff_analysis as module
 
           required = [
-              "ManifestDiffAnalysisError",
-              "ManifestDependencyChange",
-              "ManifestDiff",
-              "ManifestDiffAnalysisResult",
+              "ManifestChange",
+              "ManifestChangeType",
+              "ManifestDiffResult",
               "analyze_manifest_diff",
-              "analyze_manifest_diffs",
-              "validate_manifest_diff_analysis",
+              "analyze_manifest_mapping",
               "validate_manifest_diff",
           ]
 
-          for name in required:
-              assert hasattr(m, name), name
+          missing = [
+              name for name in required
+              if not hasattr(module, name)
+          ]
 
-          print("TASK 217 IMPORT PASS")
+          if missing:
+              raise SystemExit(
+                  f"Missing required API: {missing}"
+              )
+
+          print("TASK 217 IMPORT: PASS")
           PY
 
-      - name: Run TASK 217 tests ONLY
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Run Task 217 tests only
         shell: bash
         run: |
           set -euo pipefail
@@ -114,7 +105,7 @@ jobs:
             -q \
             tests/test_manifest_diff_analysis.py
 
-      - name: TASK 217 isolated live check
+      - name: Run live manifest diff validation
         shell: bash
         run: |
           set -euo pipefail
@@ -122,139 +113,64 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python -B - <<'PY'
-          import tempfile
-          from pathlib import Path
-
           from sentinelshield.manifest_diff_analysis import (
-              analyze_manifest_diff,
-              validate_manifest_diff_analysis,
-          )
-
-          with tempfile.TemporaryDirectory() as raw:
-              root = Path(raw).resolve()
-
-              (root / ".git").mkdir()
-
-              (root / "package.json").write_text(
-                  "{}",
-                  encoding="utf-8",
-              )
-
-              diff = (
-                  "diff --git a/package.json b/package.json\n"
-                  "--- a/package.json\n"
-                  "+++ b/package.json\n"
-                  "@@ -1 +1,4 @@\n"
-                  " {\n"
-                  '-  "dependencies": {}\n'
-                  '+  "dependencies": {\n'
-                  '+    "express": "4.21.0"\n'
-                  '+  }\n'
-              )
-
-              result = analyze_manifest_diff(
-                  root,
-                  diff,
-                  ["package.json"],
-              )
-
-              assert Path(
-                  result.repository_root
-              ).is_absolute()
-
-              assert result.manifests[0].manager == "npm"
-
-              assert any(
-                  item.name == "express"
-                  and item.change_type == "added"
-                  for item in (
-                      result.manifests[0]
-                      .dependency_changes
-                  )
-              )
-
-              assert validate_manifest_diff_analysis(
-                  result
-              )
-
-          print("TASK 217 LIVE PASS")
-          PY
-
-      - name: TASK 217 security check
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-
-          python -B - <<'PY'
-          import tempfile
-          from pathlib import Path
-
-          from sentinelshield.manifest_diff_analysis import (
-              ManifestDiffAnalysisError,
+              ManifestChange,
+              ManifestChangeType,
               analyze_manifest_diff,
           )
 
-          with tempfile.TemporaryDirectory() as raw:
-              root = Path(raw).resolve()
-              (root / ".git").mkdir()
+          expected = ManifestChange(
+              "package.json",
+              ManifestChangeType.MODIFIED,
+              added_dependencies=("safe-package",),
+          )
 
-              try:
-                  analyze_manifest_diff(
-                      root,
-                      "",
-                      ["../outside.json"],
-                  )
-              except ManifestDiffAnalysisError:
-                  pass
-              else:
-                  raise AssertionError(
-                      "Path traversal accepted"
-                  )
+          passed = analyze_manifest_diff(
+              [expected],
+              expected_manifest_paths=("package.json",),
+              expected_added_dependencies=("safe-package",),
+          )
 
-              try:
-                  analyze_manifest_diff(
-                      root,
-                      "",
-                      ["/tmp/package.json"],
-                  )
-              except ManifestDiffAnalysisError:
-                  pass
-              else:
-                  raise AssertionError(
-                      "Absolute manifest path accepted"
-                  )
+          assert passed.passed is True
 
-              result = analyze_manifest_diff(
-                  root,
-                  "+token=super-secret-value\n",
-                  ["package.json"],
-              )
+          unexpected = ManifestChange(
+              "package.json",
+              ManifestChangeType.MODIFIED,
+              added_dependencies=("unexpected-package",),
+          )
 
-              assert (
-                  "super-secret-value"
-                  not in result.redacted_diff
-              )
+          failed = analyze_manifest_diff(
+              [unexpected],
+              expected_manifest_paths=("package.json",),
+          )
 
-          print("TASK 217 SECURITY PASS")
+          assert failed.passed is False
+          assert failed.unexpected_added_dependencies == (
+              "unexpected-package",
+          )
+
+          print("TASK 217 LIVE VALIDATION: PASS")
           PY
 
-      - name: Verify TASK 217 did not create bytecode
+      - name: Verify no bytecode changes were created
         shell: bash
         run: |
           set -euo pipefail
 
           if git status --porcelain -- \
-            '*.pyc' '*.pyo' | grep -q .; then
-            echo "Unexpected bytecode change."
-            git status --short -- \
-              '*.pyc' '*.pyo'
+              '*.pyc' \
+              '*.pyo'; then
+            :
+          fi
+
+          if git status --porcelain -- \
+              '*.pyc' \
+              '*.pyo' | grep -q .; then
+            echo "Unexpected bytecode changes detected."
             exit 1
           fi
 
-          echo "BYTECODE PASS"
+          echo "BYTECODE PROTECTION: PASS"
 
-      - name: Final TASK 217 status
-        run: |
-          echo "TASK 217 ONLY - PASS"
+      - name: Final Task 217 status
+        run: echo "TASK 217 - MANIFEST DIFF ANALYSIS: PASS"
