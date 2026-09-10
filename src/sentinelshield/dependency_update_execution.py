@@ -167,13 +167,17 @@ def _build_environment(
     allowed = set(policy.allowed_environment)
 
     if environment is None:
+        # Inherited environment is filtered by the allowlist.
+        # Unlisted variables already present on the runner are ignored.
         source = os.environ
+        strict = False
     else:
         if not isinstance(environment, Mapping):
             raise DependencyUpdateExecutionError(
                 "environment must be a mapping"
             )
         source = environment
+        strict = True
 
     result: dict[str, str] = {}
 
@@ -184,9 +188,11 @@ def _build_environment(
             )
 
         if name not in allowed:
-            raise DependencyUpdateExecutionError(
-                f"environment variable is not allowed: {name}"
-            )
+            if strict:
+                raise DependencyUpdateExecutionError(
+                    f"environment variable is not allowed: {name}"
+                )
+            continue
 
         if not isinstance(value, str):
             raise DependencyUpdateExecutionError(

@@ -126,7 +126,7 @@ def test_file_working_directory_is_rejected(tmp_path: Path) -> None:
         )
 
 
-def test_environment_allowlist(tmp_path: Path) -> None:
+def test_explicit_allowed_environment(tmp_path: Path) -> None:
     result = execute_dependency_update(
         [
             sys.executable,
@@ -141,13 +141,32 @@ def test_environment_allowlist(tmp_path: Path) -> None:
     assert "true" in result.stdout
 
 
-def test_disallowed_environment_is_rejected(tmp_path: Path) -> None:
+def test_explicit_disallowed_environment_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(DependencyUpdateExecutionError):
         execute_dependency_update(
             [sys.executable, "-c", "print('x')"],
             tmp_path,
             environment={"SECRET_TOKEN": "secret"},
         )
+
+
+def test_inherited_environment_is_filtered(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("UNSAFE_TEST_VARIABLE", "must-not-be-forwarded")
+
+    result = execute_dependency_update(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "print(os.environ.get('UNSAFE_TEST_VARIABLE', 'ABSENT'))"
+            ),
+        ],
+        tmp_path,
+    )
+
+    assert result.success is True
+    assert "ABSENT" in result.stdout
 
 
 def test_nul_environment_value_is_rejected(tmp_path: Path) -> None:
