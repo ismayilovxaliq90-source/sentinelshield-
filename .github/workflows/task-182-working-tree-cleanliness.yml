@@ -1,0 +1,98 @@
+name: SentinelShield Task 182 - Working Tree Cleanliness
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/sentinelshield/working_tree_cleanliness.py"
+      - "tests/test_working_tree_cleanliness.py"
+      - ".github/workflows/task-182-working-tree-cleanliness.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  task-182:
+    name: Task 182 Server Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install test runner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run Task 182 unit tests
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pytest tests/test_working_tree_cleanliness.py -q
+
+      - name: Run live Task 182 validation
+        env:
+          PYTHONPATH: src
+        run: |
+          python - <<'PY'
+          import os
+
+          from sentinelshield.working_tree_cleanliness import (
+              evaluate_working_tree_cleanliness,
+          )
+
+          repository = os.environ["GITHUB_WORKSPACE"]
+
+          result = evaluate_working_tree_cleanliness(repository)
+
+          print("=== TASK 182 — WORKING TREE CLEANLINESS ===")
+          print(f"valid: {result.valid}")
+          print(f"repository_root: {result.repository_root}")
+          print(f"clean: {result.clean}")
+          print(f"changed: {result.changed}")
+          print(f"change_count: {result.change_count}")
+          print(f"reason: {result.reason}")
+
+          for change in result.changes:
+              print(
+                  f"CHANGE: "
+                  f"{change.status!r} "
+                  f"{change.path}"
+              )
+
+          if not result.valid:
+              raise SystemExit(
+                  "TASK 182 FAIL: working tree is not clean"
+              )
+
+          if not result.clean:
+              raise SystemExit(
+                  "TASK 182 FAIL: working tree reported dirty"
+              )
+
+          if result.change_count != 0:
+              raise SystemExit(
+                  "TASK 182 FAIL: unexpected changes detected"
+              )
+
+          print("TASK 182 — WORKING TREE CLEANLINESS: PASS")
+          print("STATUS: VERIFIED IN GITHUB ACTIONS")
+          PY
+
+      - name: Publish Task 182 summary
+        if: always()
+        run: |
+          {
+            echo "## Task 182 — Working Tree Cleanliness Evaluation"
+            echo
+            echo "Execution environment: GitHub Actions isolated runner"
+            echo "Local WSL Task execution: NOT PERFORMED"
+            echo "Working tree evaluation: executed on server runner"
+          } >> "$GITHUB_STEP_SUMMARY"
