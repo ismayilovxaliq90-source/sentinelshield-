@@ -1,0 +1,188 @@
+name: Task 201 - Lockfile Regeneration
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  task-201:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install test dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify source import path
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -c "import sentinelshield"
+
+      - name: Run Task 201 unit tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python -m pytest -q tests/test_lockfile_regeneration.py
+
+      - name: Live npm lockfile regeneration
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          TMP_REPO="$(mktemp -d)"
+          trap 'rm -rf "$TMP_REPO"' EXIT
+
+          cd "$TMP_REPO"
+
+          cat > package.json <<'JSON'
+          {
+            "name": "sentinelshield-task-201-fixture",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {}
+          }
+          JSON
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from sentinelshield.lockfile_regeneration import (
+              LockfileRegenerationRequest,
+              regenerate_lockfile,
+              validate_lockfile_result,
+          )
+
+          root = Path.cwd()
+          manifest = root / "package.json"
+          lockfile = root / "package-lock.json"
+
+          request = LockfileRegenerationRequest(
+              repository_root=root,
+              ecosystem="npm",
+              manifest=manifest,
+              lockfile=lockfile,
+              package_manager="npm",
+              timeout=180,
+          )
+
+          result = regenerate_lockfile(request)
+
+          print("=== TASK 201 LIVE VALIDATION ===")
+          print(json.dumps(result.to_dict(), indent=2))
+
+          if not validate_lockfile_result(result):
+              raise RuntimeError(
+                  f"TASK 201 FAIL: {result.reason}"
+              )
+
+          if not lockfile.exists():
+              raise RuntimeError(
+                  "TASK 201 FAIL: package-lock.json was not generated"
+              )
+
+          if not lockfile.is_file():
+              raise RuntimeError(
+                  "TASK 201 FAIL: generated lockfile is not a file"
+              )
+
+          if lockfile.is_symlink():
+              raise RuntimeError(
+                  "TASK 201 FAIL: generated lockfile is a symlink"
+              )
+
+          if lockfile.stat().st_size == 0:
+              raise RuntimeError(
+                  "TASK 201 FAIL: generated lockfile is empty"
+              )
+
+          print("TASK 201 PASS: lockfile regenerated successfully")
+          PY
+
+      - name: Verify generated lockfile structure
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          TMP_REPO="$(mktemp -d)"
+          trap 'rm -rf "$TMP_REPO"' EXIT
+
+          cd "$TMP_REPO"
+
+          cat > package.json <<'JSON'
+          {
+            "name": "sentinelshield-task-201-structure",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {}
+          }
+          JSON
+
+          npm install \
+            --package-lock-only \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund
+
+          test -f package-lock.json
+          test ! -L package-lock.json
+          test -s package-lock.json
+
+          node -e '
+            const fs = require("fs");
+            const data = JSON.parse(
+              fs.readFileSync("package-lock.json", "utf8")
+            );
+
+            if (!data.lockfileVersion) {
+              throw new Error("lockfileVersion missing");
+            }
+
+            if (!data.packages) {
+              throw new Error("packages section missing");
+            }
+
+            console.log(
+              "lockfileVersion:",
+              data.lockfileVersion
+            );
+          '
+
+          echo "TASK 201 PASS: lockfile structure validated"
+
+      - name: Verify no Python bytecode changes
+        run: |
+          if git status --porcelain=v1 --untracked-files=all -- \
+              '*.pyc' '*.pyo' | grep -q .; then
+            echo "TASK 201 FAIL: Python bytecode changes detected"
+            git status --short
+            exit 1
+          fi
+
+          echo "TASK 201 PASS: no Python bytecode changes"
+
+      - name: Verify repository status
+        run: |
+          git status --short
+          echo "TASK 201 GitHub server validation completed"
