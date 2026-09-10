@@ -1,0 +1,177 @@
+name: Task 217 - Manifest Diff Analysis
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/manifest_diff_analysis.py"
+      - "tests/test_manifest_diff_analysis.py"
+      - ".github/workflows/task-217-manifest-diff-analysis.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/manifest_diff_analysis.py"
+      - "tests/test_manifest_diff_analysis.py"
+      - ".github/workflows/task-217-manifest-diff-analysis.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/src
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  task-217:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Prepare environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python --version
+          git --version
+
+      - name: Syntax validation without bytecode
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          import ast
+          from pathlib import Path
+
+          files = [
+              Path("src/sentinelshield/manifest_diff_analysis.py"),
+              Path("tests/test_manifest_diff_analysis.py"),
+          ]
+
+          for path in files:
+              ast.parse(
+                  path.read_text(encoding="utf-8"),
+                  filename=str(path),
+              )
+
+          print("TASK 217 syntax validation: PASS")
+          PY
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Import validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          from sentinelshield.manifest_diff_analysis import (
+              ManifestDependencyChange,
+              ManifestDiff,
+              ManifestDiffAnalysisError,
+              ManifestDiffAnalysisResult,
+              analyze_manifest_diff,
+              analyze_manifest_diffs,
+              validate_manifest_diff_analysis,
+          )
+
+          print("TASK 217 import validation: PASS")
+          PY
+
+      - name: Task 217 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B -m pytest \
+            tests/test_manifest_diff_analysis.py \
+            -q
+
+      - name: Live manifest diff analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
+          python -B - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from sentinelshield.manifest_diff_analysis import (
+              analyze_manifest_diff,
+          )
+
+          with tempfile.TemporaryDirectory() as temp:
+              root = Path(temp)
+
+              (root / ".git").mkdir()
+              (root / "pyproject.toml").write_text(
+                  "[project]\n"
+                  'dependencies = ["requests==2.31.0"]\n',
+                  encoding="utf-8",
+              )
+
+              diff = (
+                  "diff --git a/pyproject.toml b/pyproject.toml\n"
+                  "--- a/pyproject.toml\n"
+                  "+++ b/pyproject.toml\n"
+                  "@@ -1,2 +1,2 @@\n"
+                  " [project]\n"
+                  '-dependencies = ["requests==2.31.0"]\n'
+                  '+dependencies = ["requests==2.32.0"]\n'
+              )
+
+              result = analyze_manifest_diff(
+                  root,
+                  diff,
+                  ["pyproject.toml"],
+              )
+
+              assert result.changed_manifest_count == 1
+              assert result.dependency_change_count == 1
+              assert result.manifests[0].manager == "python"
+
+              change = result.manifests[0].dependency_changes[0]
+
+              assert change.name == "requests"
+              assert change.old_version == "==2.31.0"
+              assert change.new_version == "==2.32.0"
+              assert change.change_type == "updated"
+
+          print("TASK 217 live manifest diff analysis: PASS")
+          PY
+
+      - name: Bytecode protection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git status --porcelain -- \
+              '*.pyc' \
+              '*.pyo' \
+              '*.pyd' | grep -q .; then
+            echo "Unexpected bytecode changes detected"
+            exit 1
+          fi
+
+          echo "TASK 217 bytecode protection: PASS"
+
+      - name: Final task status
+        run: |
+          echo "TASK 217 - MANIFEST DIFF ANALYSIS: PASS"
