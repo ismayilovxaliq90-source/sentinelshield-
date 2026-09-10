@@ -1,0 +1,122 @@
+name: Task 183 Server Validation
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  task-183:
+    name: Task 183 Existing Change Protection
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify Task 183 files
+        run: |
+          test -f src/sentinelshield/existing_change_protection.py
+          test -f tests/test_existing_change_protection.py
+
+      - name: Run Task 183 unit tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+            tests/test_existing_change_protection.py \
+            -q
+
+      - name: Task 183 Server Validation
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
+          from pathlib import Path
+
+          from sentinelshield.existing_change_protection import (
+              capture_existing_change_protection,
+              verify_existing_change_protection,
+          )
+
+          root = Path.cwd()
+
+          before = capture_existing_change_protection(root)
+
+          print("=== TASK 183 — EXISTING CHANGE PROTECTION ===")
+          print(f"valid: {before.valid}")
+          print(f"repository_root: {before.repository_root}")
+          print(f"protected: {before.protected}")
+          print(f"change_count: {before.change_count}")
+          print(f"reason: {before.reason}")
+
+          for change in before.existing_changes:
+              print(
+                  "CHANGE: "
+                  f"{change.status!r} "
+                  f"{change.path!r} "
+                  f"hash={change.content_hash!r}"
+              )
+
+          if not before.valid:
+              raise SystemExit(
+                  f"TASK 183 FAIL: {before.reason}"
+              )
+
+          if not before.protected:
+              raise SystemExit(
+                  f"TASK 183 FAIL: {before.reason}"
+              )
+
+          after = verify_existing_change_protection(
+              before,
+              root,
+          )
+
+          print("=== TASK 183 — PROTECTION RECHECK ===")
+          print(f"valid: {after.valid}")
+          print(f"protected: {after.protected}")
+          print(f"change_count: {after.change_count}")
+          print(f"reason: {after.reason}")
+
+          if not after.valid:
+              raise SystemExit(
+                  f"TASK 183 FAIL: {after.reason}"
+              )
+
+          if not after.protected:
+              raise SystemExit(
+                  f"TASK 183 FAIL: {after.reason}"
+              )
+
+          print(
+              "TASK 183 PASS: "
+              "existing changes are protected"
+          )
+          PY
+
+      - name: Verify no Python bytecode was generated
+        run: |
+          if find src tests -type f \( -name "*.pyc" -o -name "*.pyo" \) -print -quit | grep -q .; then
+            echo "TASK 183 FAIL: Python bytecode was generated"
+            find src tests -type f \( -name "*.pyc" -o -name "*.pyo" \) -print
+            exit 1
+          fi
+
+          echo "No Python bytecode generated."
