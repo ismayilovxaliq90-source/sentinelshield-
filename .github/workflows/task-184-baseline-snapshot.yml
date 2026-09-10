@@ -1,0 +1,116 @@
+name: Task 184 Server Validation
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  task-184:
+    name: Task 184 Baseline Snapshot Creation
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: src
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Verify Task 184 source exists
+        run: |
+          test -f src/sentinelshield/baseline_snapshot.py
+          test -f tests/test_baseline_snapshot.py
+
+      - name: Run Task 184 unit tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 \
+          PYTHONPATH=src \
+          python -m pytest \
+            tests/test_baseline_snapshot.py \
+            -q
+
+      - name: Task 184 Server Validation
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 \
+          PYTHONPATH=src \
+          python - <<'PY'
+          from pathlib import Path
+
+          from sentinelshield.baseline_snapshot import (
+              create_baseline_snapshot,
+              baseline_has_changes,
+          )
+
+          root = Path.cwd()
+
+          snapshot = create_baseline_snapshot(root)
+
+          print("=== TASK 184 — BASELINE SNAPSHOT CREATION ===")
+          print(f"valid: {snapshot.valid}")
+          print(f"repository_root: {snapshot.repository_root}")
+          print(f"head: {snapshot.head}")
+          print(f"branch: {snapshot.branch}")
+          print(f"detached_head: {snapshot.detached_head}")
+          print(f"status_count: {len(snapshot.status)}")
+          print(f"file_count: {len(snapshot.files)}")
+          print(f"has_existing_changes: {baseline_has_changes(snapshot)}")
+          print(f"reason: {snapshot.reason}")
+
+          if not snapshot.valid:
+              raise SystemExit(
+                  f"TASK 184 FAIL: {snapshot.reason}"
+              )
+
+          if not snapshot.head:
+              raise SystemExit(
+                  "TASK 184 FAIL: HEAD was not captured"
+              )
+
+          if not snapshot.files:
+              raise SystemExit(
+                  "TASK 184 FAIL: repository file inventory is empty"
+              )
+
+          for item in snapshot.files[:20]:
+              print(
+                  f"BASELINE: {item.kind} "
+                  f"{item.path!r} "
+                  f"{item.fingerprint}"
+              )
+
+          print(
+              "TASK 184 PASS: baseline snapshot created successfully"
+          )
+          PY
+
+      - name: Verify no Python bytecode was generated
+        run: |
+          if find src tests -type f \
+            \( -name "*.pyc" -o -name "*.pyo" \) \
+            -print -quit | grep -q .; then
+            echo "TASK 184 FAIL: Python bytecode was generated"
+            find src tests -type f \
+              \( -name "*.pyc" -o -name "*.pyo" \) \
+              -print
+          else
+            echo "No Python bytecode generated."
+          fi
