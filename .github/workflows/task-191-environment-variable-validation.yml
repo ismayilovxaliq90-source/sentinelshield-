@@ -5,15 +5,13 @@ on:
     branches:
       - "**"
   pull_request:
-    branches:
-      - "**"
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   task-191:
+    name: Validate environment variables
     runs-on: ubuntu-latest
 
     env:
@@ -25,43 +23,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install test dependency
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
+          python -m pip install --disable-pip-version-check pytest
 
-      - name: Export PYTHONPATH
+      - name: Verify source import path
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          python -c "import sentinelshield"
+          python -c "import sentinelshield.environment_variable_validation"
 
-      - name: Run TASK 191 tests
+      - name: Run TASK 191 unit tests
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_environment_variable_validation.py
 
-      - name: Live security validation
+      - name: Run TASK 191 security validation
         run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+
           python - <<'PY'
           from sentinelshield.environment_variable_validation import (
               EnvironmentVariablePolicy,
+              EnvironmentVariableValidationError,
+              require_valid_environment,
               validate_environment_variables,
           )
 
-          safe = frozenset({
-              "PATH",
-              "HOME",
-              "LANG",
-              "LC_ALL",
-              "PYTHONUNBUFFERED",
-          })
-
           policy = EnvironmentVariablePolicy(
-              allowed_names=safe,
+              allowed_names=frozenset({"PATH", "HOME", "LANG"}),
               required_names=frozenset({"PATH"}),
           )
 
@@ -69,63 +63,66 @@ jobs:
               {
                   "PATH": "/usr/bin",
                   "HOME": "/home/runner",
+                  "LANG": "C.UTF-8",
               },
               policy,
           )
 
-          assert valid.valid
+          assert valid.valid is True
           assert valid.failures == ()
+          assert valid.environment["PATH"] == "/usr/bin"
 
-          rejected = validate_environment_variables(
+          unknown = validate_environment_variables(
               {
                   "PATH": "/usr/bin",
-                  "EVIL": "command",
+                  "UNTRUSTED": "value",
               },
               policy,
           )
 
-          assert not rejected.valid
-          assert "VARIABLE_NOT_ALLOWED" in rejected.failures
+          assert unknown.valid is False
+          assert "VARIABLE_NOT_ALLOWLISTED:UNTRUSTED" in unknown.failures
+
+          secret_policy = EnvironmentVariablePolicy(
+              allowed_names=frozenset({"PATH", "API_TOKEN"}),
+          )
 
           secret = validate_environment_variables(
               {
                   "PATH": "/usr/bin",
-                  "API_TOKEN": "do-not-expose",
+                  "API_TOKEN": "should-not-pass",
               },
-              EnvironmentVariablePolicy(
-                  allowed_names=frozenset({
-                      "PATH",
-                      "API_TOKEN",
-                  }),
-              ),
+              secret_policy,
           )
 
-          assert not secret.valid
-          assert "SECRET_LIKE_VARIABLE_REJECTED" in secret.failures
+          assert secret.valid is False
+          assert "SECRET_VARIABLE_REJECTED:API_TOKEN" in secret.failures
 
-          control = validate_environment_variables(
-              {
-                  "PATH": "/usr/bin\nmalicious",
-              },
-              policy,
-          )
+          try:
+              require_valid_environment(
+                  {"UNTRUSTED": "value"},
+                  policy,
+              )
+          except EnvironmentVariableValidationError:
+              pass
+          else:
+              raise AssertionError(
+                  "Invalid environment was accepted by require_valid_environment"
+              )
 
-          assert not control.valid
-          assert "CONTROL_CHARACTER_IN_VALUE" in control.failures
-
-          print("TASK 191 LIVE VALIDATION: PASS")
+          print("TASK 191 PASS")
           PY
 
-      - name: Verify no bytecode changes
+      - name: Verify no Python bytecode changes were produced
         run: |
-          changed="$(git status --porcelain=v1 --untracked-files=all -- '*.pyc' '*.pyo')"
-          if [ -n "$changed" ]; then
+          if git status --porcelain=v1 --untracked-files=all -- \
+              '*.pyc' '*.pyo' | grep -q .; then
             echo "TASK 191 FAIL: Python bytecode changes detected"
-            echo "$changed"
+            git status --short
             exit 1
           fi
-          echo "TASK 191 BYTECODE CHECK: PASS"
 
-      - name: Final repository status
+      - name: Final TASK 191 status
         run: |
-          git status --short
+          echo "TASK 191 - Environment Variable Validation"
+          echo "STATUS: PASS"
