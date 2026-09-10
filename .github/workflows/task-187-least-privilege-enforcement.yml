@@ -1,16 +1,20 @@
-name: Task 187 - Least Privilege Enforcement
+name: TASK 187 - Least Privilege Enforcement
 
 on:
   push:
     branches:
       - "**"
   pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   task-187:
+    name: Least Privilege Enforcement
     runs-on: ubuntu-latest
 
     env:
@@ -22,7 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set Python
+      - name: Setup Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -32,17 +36,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
 
-      - name: Verify source import path
-        run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/src"
-          python -c "import sentinelshield"
-
-      - name: Run Task 187 tests
+      - name: Run TASK 187 unit tests
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_least_privilege_enforcement.py
 
-      - name: Live least-privilege validation
+      - name: Live least privilege validation
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
@@ -53,25 +52,20 @@ jobs:
 
           result = validate_current_least_privilege()
 
-          print("=== TASK 187 LIVE VALIDATION ===")
-          print("allowed:", result.allowed)
-          print("uid:", result.uid)
-          print("gid:", result.gid)
-          print("is_root:", result.is_root)
-          print("reason:", result.reason)
-
-          if result.identity is None:
-              raise RuntimeError("TASK 187 FAIL: execution identity unavailable")
-
-          if result.is_root:
-              raise RuntimeError(
-                  "TASK 187 FAIL: GitHub Actions execution is running as root"
-              )
+          print("TASK 187 identity UID:", result.identity.uid)
+          print("TASK 187 identity GID:", result.identity.gid)
+          print("TASK 187 allowed:", result.allowed)
+          print("TASK 187 failures:", result.failures)
 
           if not result.allowed:
-              raise RuntimeError(
-                  f"TASK 187 FAIL: least-privilege policy rejected runner: "
-                  f"{result.reason}"
+              raise SystemExit(
+                  "TASK 187 FAIL: GitHub Actions runner "
+                  "does not satisfy least-privilege policy"
+              )
+
+          if result.identity.uid == 0:
+              raise SystemExit(
+                  "TASK 187 FAIL: workflow runner is root"
               )
 
           print("TASK 187 PASS: least privilege enforced")
@@ -86,8 +80,11 @@ jobs:
             exit 1
           fi
 
-          echo "TASK 187 PASS: no Python bytecode changes"
+          echo "TASK 187 PASS: no Python bytecode changes detected"
 
-      - name: Final status
+      - name: Final TASK 187 status
         run: |
-          echo "TASK 187 GitHub Actions validation completed"
+          echo "========================================"
+          echo "TASK 187 - LEAST PRIVILEGE ENFORCEMENT"
+          echo "STATUS: PASS"
+          echo "========================================"
