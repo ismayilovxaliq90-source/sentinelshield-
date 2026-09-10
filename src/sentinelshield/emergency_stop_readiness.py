@@ -1,202 +1,148 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-import threading
-import time
+from typing import Callable
 
 
-class EmergencyStopError(RuntimeError):
-    """Raised when emergency-stop state cannot be safely managed."""
-
-
-class EmergencyStopState(str, Enum):
-    READY = "READY"
-    STOP_REQUESTED = "STOP_REQUESTED"
-    STOPPED = "STOPPED"
+class EmergencyStopError(ValueError):
+    """Raised when emergency-stop readiness validation fails."""
 
 
 @dataclass(frozen=True)
-class EmergencyStopResult:
+class EmergencyStopPolicy:
+    require_callback: bool = True
+    initially_stopped: bool = False
+
+
+@dataclass(frozen=True)
+class EmergencyStopReadinessResult:
     ready: bool
-    stop_requested: bool
     stopped: bool
-    state: EmergencyStopState
+    callback_available: bool
     reason: str
-    requested_at: float | None
 
     def to_dict(self) -> dict:
         return {
             "ready": self.ready,
-            "stop_requested": self.stop_requested,
             "stopped": self.stopped,
-            "state": self.state.value,
+            "callback_available": self.callback_available,
             "reason": self.reason,
-            "requested_at": self.requested_at,
         }
 
 
 class EmergencyStopController:
     """
-    Thread-safe emergency-stop state controller.
+    In-memory emergency-stop controller.
 
-    This class only manages stop state.
-    It does not execute, terminate, kill, or modify any process.
+    This class does not start, stop, kill, or modify any real process.
+    It only maintains an explicit control state.
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._state = EmergencyStopState.READY
-        self._requested_at: float | None = None
-        self._reason: str | None = None
+    def __init__(
+        self,
+        callback: Callable[[], object] | None = None,
+        *,
+        policy: EmergencyStopPolicy | None = None,
+    ) -> None:
+        self._policy = policy or EmergencyStopPolicy()
 
-    @property
-    def state(self) -> EmergencyStopState:
-        with self._lock:
-            return self._state
-
-    @property
-    def is_ready(self) -> bool:
-        with self._lock:
-            return self._state == EmergencyStopState.READY
-
-    @property
-    def is_stop_requested(self) -> bool:
-        with self._lock:
-            return self._state in (
-                EmergencyStopState.STOP_REQUESTED,
-                EmergencyStopState.STOPPED,
+        if not isinstance(self._policy, EmergencyStopPolicy):
+            raise EmergencyStopError(
+                "policy must be EmergencyStopPolicy"
             )
 
-    @property
-    def is_stopped(self) -> bool:
-        with self._lock:
-            return self._state == EmergencyStopState.STOPPED
-
-    @property
-    def requested_at(self) -> float | None:
-        with self._lock:
-            return self._requested_at
-
-    @property
-    def reason(self) -> str | None:
-        with self._lock:
-            return self._reason
-
-    def request_stop(self, reason: str = "EMERGENCY_STOP") -> EmergencyStopResult:
-        if not isinstance(reason, str):
-            raise EmergencyStopError("reason must be a string")
-
-        reason = reason.strip()
-
-        if not reason:
-            raise EmergencyStopError("reason must not be empty")
-
-        with self._lock:
-            if self._state == EmergencyStopState.READY:
-                self._state = EmergencyStopState.STOP_REQUESTED
-                self._requested_at = time.monotonic()
-                self._reason = reason
-
-            elif self._state == EmergencyStopState.STOP_REQUESTED:
-                # Idempotent: retain the original request and reason.
-                pass
-
-            elif self._state == EmergencyStopState.STOPPED:
-                # A stopped controller must never return to READY implicitly.
-                pass
-
-            return self._result_locked()
-
-    def confirm_stopped(self) -> EmergencyStopResult:
-        with self._lock:
-            if self._state == EmergencyStopState.READY:
-                raise EmergencyStopError(
-                    "cannot confirm STOPPED before stop was requested"
-                )
-
-            self._state = EmergencyStopState.STOPPED
-
-            return self._result_locked()
-
-    def should_stop(self) -> bool:
-        with self._lock:
-            return self._state in (
-                EmergencyStopState.STOP_REQUESTED,
-                EmergencyStopState.STOPPED,
+        if not isinstance(self._policy.require_callback, bool):
+            raise EmergencyStopError(
+                "require_callback must be bool"
             )
 
-    def status(self) -> EmergencyStopResult:
-        with self._lock:
-            return self._result_locked()
+        if not isinstance(self._policy.initially_stopped, bool):
+            raise EmergencyStopError(
+                "initially_stopped must be bool"
+            )
 
-    def _result_locked(self) -> EmergencyStopResult:
-        return EmergencyStopResult(
-            ready=self._state == EmergencyStopState.READY,
-            stop_requested=self._state
-            in (
-                EmergencyStopState.STOP_REQUESTED,
-                EmergencyStopState.STOPPED,
-            ),
-            stopped=self._state == EmergencyStopState.STOPPED,
-            state=self._state,
-            reason=self._reason or "",
-            requested_at=self._requested_at,
+        if callback is not None and not callable(callback):
+            raise EmergencyStopError(
+                "callback must be callable or None"
+            )
+
+        self._callback = callback
+        self._stopped = self._policy.initially_stopped
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    @property
+    def callback_available(self) -> bool:
+        return self._callback is not None
+
+    def readiness(self) -> EmergencyStopReadinessResult:
+        if self._policy.require_callback and self._callback is None:
+            return EmergencyStopReadinessResult(
+                ready=False,
+                stopped=self._stopped,
+                callback_available=False,
+                reason="STOP_CALLBACK_REQUIRED",
+            )
+
+        if self._stopped:
+            return EmergencyStopReadinessResult(
+                ready=False,
+                stopped=True,
+                callback_available=self.callback_available,
+                reason="EMERGENCY_STOP_ACTIVE",
+            )
+
+        return EmergencyStopReadinessResult(
+            ready=True,
+            stopped=False,
+            callback_available=self.callback_available,
+            reason="EMERGENCY_STOP_READY",
         )
 
+    def request_stop(self) -> bool:
+        self._stopped = True
 
-def create_emergency_stop_controller() -> EmergencyStopController:
-    """
-    Create a fresh controller in READY state.
+        if self._callback is None:
+            return True
 
-    No process, command, thread, or external resource is executed.
-    """
-    return EmergencyStopController()
+        try:
+            self._callback()
+        except Exception:
+            return False
+
+        return True
+
+    def reset(self) -> None:
+        self._stopped = False
+
+    def require_ready(self) -> EmergencyStopReadinessResult:
+        result = self.readiness()
+
+        if not result.ready:
+            raise EmergencyStopError(result.reason)
+
+        return result
 
 
 def validate_emergency_stop_readiness(
     controller: EmergencyStopController,
-) -> EmergencyStopResult:
+) -> EmergencyStopReadinessResult:
     if not isinstance(controller, EmergencyStopController):
         raise EmergencyStopError(
             "controller must be EmergencyStopController"
         )
 
-    result = controller.status()
-
-    if result.state not in EmergencyStopState:
-        raise EmergencyStopError("invalid emergency-stop state")
-
-    if result.state == EmergencyStopState.READY:
-        if result.stop_requested or result.stopped:
-            raise EmergencyStopError(
-                "READY state contains stop flags"
-            )
-
-    if result.state == EmergencyStopState.STOP_REQUESTED:
-        if not result.stop_requested or result.stopped:
-            raise EmergencyStopError(
-                "STOP_REQUESTED state is inconsistent"
-            )
-
-    if result.state == EmergencyStopState.STOPPED:
-        if not result.stop_requested or not result.stopped:
-            raise EmergencyStopError(
-                "STOPPED state is inconsistent"
-            )
-
-    return result
+    return controller.readiness()
 
 
-def require_execution_allowed(
+def require_emergency_stop_readiness(
     controller: EmergencyStopController,
-) -> None:
+) -> EmergencyStopReadinessResult:
     if not isinstance(controller, EmergencyStopController):
         raise EmergencyStopError(
             "controller must be EmergencyStopController"
         )
 
-    if controller.should_stop():
-        raise EmergencyStopError(
-            "execution blocked by emergency stop"
-        )
+    return controller.require_ready()

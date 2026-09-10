@@ -1,218 +1,215 @@
-import threading
-
 import pytest
 
 from sentinelshield.emergency_stop_readiness import (
     EmergencyStopController,
     EmergencyStopError,
-    EmergencyStopState,
-    create_emergency_stop_controller,
-    require_execution_allowed,
+    EmergencyStopPolicy,
+    require_emergency_stop_readiness,
     validate_emergency_stop_readiness,
 )
 
 
-def test_new_controller_is_ready():
-    controller = create_emergency_stop_controller()
+def test_callback_is_required_by_default():
+    controller = EmergencyStopController()
 
-    result = controller.status()
+    result = validate_emergency_stop_readiness(controller)
 
-    assert result.ready is True
-    assert result.stop_requested is False
-    assert result.stopped is False
-    assert result.state == EmergencyStopState.READY
+    assert result.ready is False
+    assert result.callback_available is False
+    assert result.reason == "STOP_CALLBACK_REQUIRED"
 
 
-def test_readiness_validation_accepts_ready_controller():
-    controller = create_emergency_stop_controller()
+def test_controller_with_callback_is_ready():
+    called = []
+
+    def callback():
+        called.append(True)
+
+    controller = EmergencyStopController(callback)
 
     result = validate_emergency_stop_readiness(controller)
 
     assert result.ready is True
-    assert result.state == EmergencyStopState.READY
+    assert result.stopped is False
+    assert result.callback_available is True
+    assert result.reason == "EMERGENCY_STOP_READY"
+    assert called == []
 
 
-def test_execution_is_allowed_when_ready():
-    controller = create_emergency_stop_controller()
+def test_readiness_does_not_execute_callback():
+    called = []
 
-    require_execution_allowed(controller)
+    def callback():
+        called.append(True)
+
+    controller = EmergencyStopController(callback)
+
+    result = controller.readiness()
+
+    assert result.ready is True
+    assert called == []
 
 
 def test_request_stop_changes_state():
-    controller = create_emergency_stop_controller()
+    called = []
 
-    result = controller.request_stop("manual emergency stop")
+    def callback():
+        called.append(True)
+
+    controller = EmergencyStopController(callback)
+
+    assert controller.stopped is False
+
+    callback_result = controller.request_stop()
+
+    assert callback_result is True
+    assert controller.stopped is True
+    assert called == [True]
+
+
+def test_active_stop_is_not_ready():
+    controller = EmergencyStopController(
+        lambda: None,
+        policy=EmergencyStopPolicy(
+            initially_stopped=True,
+        ),
+    )
+
+    result = controller.readiness()
 
     assert result.ready is False
-    assert result.stop_requested is True
-    assert result.stopped is False
-    assert result.state == EmergencyStopState.STOP_REQUESTED
-    assert result.reason == "manual emergency stop"
-
-
-def test_request_stop_blocks_execution():
-    controller = create_emergency_stop_controller()
-
-    controller.request_stop("safety trigger")
-
-    with pytest.raises(EmergencyStopError):
-        require_execution_allowed(controller)
-
-
-def test_should_stop_is_true_after_request():
-    controller = create_emergency_stop_controller()
-
-    assert controller.should_stop() is False
-
-    controller.request_stop()
-
-    assert controller.should_stop() is True
-
-
-def test_confirm_stopped_requires_prior_request():
-    controller = create_emergency_stop_controller()
-
-    with pytest.raises(EmergencyStopError):
-        controller.confirm_stopped()
-
-
-def test_confirm_stopped_changes_state():
-    controller = create_emergency_stop_controller()
-
-    controller.request_stop("resource violation")
-    result = controller.confirm_stopped()
-
-    assert result.state == EmergencyStopState.STOPPED
-    assert result.stop_requested is True
     assert result.stopped is True
+    assert result.reason == "EMERGENCY_STOP_ACTIVE"
 
 
-def test_stopped_state_blocks_execution():
-    controller = create_emergency_stop_controller()
+def test_require_ready_raises_when_callback_missing():
+    controller = EmergencyStopController()
+
+    with pytest.raises(EmergencyStopError):
+        controller.require_ready()
+
+
+def test_require_ready_returns_result_when_ready():
+    controller = EmergencyStopController(lambda: None)
+
+    result = require_emergency_stop_readiness(controller)
+
+    assert result.ready is True
+    assert result.reason == "EMERGENCY_STOP_READY"
+
+
+def test_reset_restores_ready_state():
+    controller = EmergencyStopController(lambda: None)
 
     controller.request_stop()
-    controller.confirm_stopped()
 
+    assert controller.stopped is True
+
+    controller.reset()
+
+    result = controller.readiness()
+
+    assert controller.stopped is False
+    assert result.ready is True
+
+
+def test_callback_exception_does_not_report_successful_stop():
+    def failing_callback():
+        raise RuntimeError("callback failure")
+
+    controller = EmergencyStopController(failing_callback)
+
+    result = controller.request_stop()
+
+    assert result is False
+    assert controller.stopped is True
+
+
+def test_callback_exception_does_not_make_readiness_ready():
+    def failing_callback():
+        raise RuntimeError("callback failure")
+
+    controller = EmergencyStopController(failing_callback)
+
+    controller.request_stop()
+
+    readiness = controller.readiness()
+
+    assert readiness.ready is False
+    assert readiness.stopped is True
+    assert readiness.reason == "EMERGENCY_STOP_ACTIVE"
+
+
+def test_callback_must_be_callable():
     with pytest.raises(EmergencyStopError):
-        require_execution_allowed(controller)
+        EmergencyStopController(callback="not-callable")
 
 
-def test_stop_request_is_idempotent():
-    controller = create_emergency_stop_controller()
-
-    first = controller.request_stop("first reason")
-    second = controller.request_stop("second reason")
-
-    assert first.state == EmergencyStopState.STOP_REQUESTED
-    assert second.state == EmergencyStopState.STOP_REQUESTED
-    assert second.reason == "first reason"
-    assert second.requested_at == first.requested_at
-
-
-@pytest.mark.parametrize(
-    "reason",
-    ["", "   "],
-)
-def test_empty_reason_is_rejected(reason):
-    controller = create_emergency_stop_controller()
-
-    with pytest.raises(EmergencyStopError):
-        controller.request_stop(reason)
-
-
-@pytest.mark.parametrize(
-    "reason",
-    [None, 123, b"stop"],
-)
-def test_invalid_reason_type_is_rejected(reason):
-    controller = create_emergency_stop_controller()
-
-    with pytest.raises(EmergencyStopError):
-        controller.request_stop(reason)
-
-
-def test_invalid_controller_is_rejected():
+def test_invalid_controller_type_is_rejected():
     with pytest.raises(EmergencyStopError):
         validate_emergency_stop_readiness(object())
 
 
-def test_require_execution_allowed_rejects_invalid_controller():
+def test_invalid_policy_type_is_rejected():
     with pytest.raises(EmergencyStopError):
-        require_execution_allowed(object())
+        EmergencyStopController(
+            lambda: None,
+            policy=object(),
+        )
 
 
-def test_status_to_dict_is_stable():
-    controller = create_emergency_stop_controller()
+def test_policy_booleans_are_validated():
+    with pytest.raises(EmergencyStopError):
+        EmergencyStopController(
+            lambda: None,
+            policy=EmergencyStopPolicy(
+                require_callback=1,
+            ),
+        )
 
-    data = controller.status().to_dict()
+
+def test_no_callback_can_be_allowed_explicitly():
+    policy = EmergencyStopPolicy(
+        require_callback=False,
+    )
+
+    controller = EmergencyStopController(
+        policy=policy,
+    )
+
+    result = controller.readiness()
+
+    assert result.ready is True
+    assert result.callback_available is False
+    assert result.reason == "EMERGENCY_STOP_READY"
+
+
+def test_to_dict_contains_expected_fields():
+    controller = EmergencyStopController(lambda: None)
+
+    data = controller.readiness().to_dict()
 
     assert data == {
         "ready": True,
-        "stop_requested": False,
         "stopped": False,
-        "state": "READY",
-        "reason": "",
+        "callback_available": True,
+        "reason": "EMERGENCY_STOP_READY",
     }
 
 
-def test_concurrent_stop_requests_are_safe():
-    controller = create_emergency_stop_controller()
+def test_stop_state_is_explicit_and_deterministic():
+    controller = EmergencyStopController(lambda: None)
 
-    errors = []
+    first = controller.readiness()
+    second = controller.readiness()
 
-    def request():
-        try:
-            controller.request_stop("concurrent stop")
-        except Exception as error:
-            errors.append(error)
-
-    threads = [
-        threading.Thread(target=request)
-        for _ in range(32)
-    ]
-
-    for thread in threads:
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    assert errors == []
-    assert controller.should_stop() is True
-    assert controller.state == EmergencyStopState.STOP_REQUESTED
+    assert first == second
 
 
-def test_stop_state_never_implicitly_resets():
-    controller = create_emergency_stop_controller()
+def test_emergency_stop_does_not_execute_external_process():
+    controller = EmergencyStopController(lambda: None)
 
-    controller.request_stop("emergency")
-    controller.status()
-    controller.status()
+    result = controller.request_stop()
 
-    assert controller.state == EmergencyStopState.STOP_REQUESTED
-    assert controller.should_stop() is True
-
-
-def test_validation_after_stop_request():
-    controller = create_emergency_stop_controller()
-
-    controller.request_stop("validation")
-
-    result = validate_emergency_stop_readiness(controller)
-
-    assert result.state == EmergencyStopState.STOP_REQUESTED
-    assert result.stop_requested is True
-    assert result.stopped is False
-
-
-def test_validation_after_confirmed_stop():
-    controller = create_emergency_stop_controller()
-
-    controller.request_stop("confirmed")
-    controller.confirm_stopped()
-
-    result = validate_emergency_stop_readiness(controller)
-
-    assert result.state == EmergencyStopState.STOPPED
-    assert result.stop_requested is True
-    assert result.stopped is True
+    assert result is True
+    assert controller.stopped is True

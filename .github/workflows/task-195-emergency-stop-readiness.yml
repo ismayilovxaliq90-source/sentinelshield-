@@ -44,67 +44,65 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
           python -m pytest -q tests/test_emergency_stop_readiness.py
 
-      - name: Live emergency-stop validation
+      - name: Live emergency-stop readiness validation
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/src"
 
           python - <<'PY'
           from sentinelshield.emergency_stop_readiness import (
+              EmergencyStopController,
               EmergencyStopError,
-              EmergencyStopState,
-              create_emergency_stop_controller,
-              require_execution_allowed,
               validate_emergency_stop_readiness,
           )
 
-          controller = create_emergency_stop_controller()
+          callback_calls = []
 
-          ready = validate_emergency_stop_readiness(controller)
+          def callback():
+              callback_calls.append(True)
 
-          if ready.state != EmergencyStopState.READY:
+          controller = EmergencyStopController(callback)
+
+          result = validate_emergency_stop_readiness(controller)
+
+          if not result.ready:
               raise SystemExit(
-                  "TASK 195 FAIL: controller is not READY"
+                  "TASK 195 FAIL: emergency-stop controller is not ready"
               )
 
-          require_execution_allowed(controller)
-
-          stopped = controller.request_stop(
-              "live safety validation"
-          )
-
-          if stopped.state != EmergencyStopState.STOP_REQUESTED:
+          if result.stopped:
               raise SystemExit(
-                  "TASK 195 FAIL: stop request was not recorded"
+                  "TASK 195 FAIL: controller unexpectedly stopped"
               )
 
-          if not stopped.stop_requested:
+          if callback_calls:
               raise SystemExit(
-                  "TASK 195 FAIL: stop flag missing"
+                  "TASK 195 FAIL: readiness check executed callback"
+              )
+
+          controller.request_stop()
+
+          stopped = validate_emergency_stop_readiness(controller)
+
+          if stopped.ready:
+              raise SystemExit(
+                  "TASK 195 FAIL: active emergency stop reported ready"
+              )
+
+          if not stopped.stopped:
+              raise SystemExit(
+                  "TASK 195 FAIL: stop state was not recorded"
               )
 
           try:
-              require_execution_allowed(controller)
+              controller.require_ready()
           except EmergencyStopError:
               pass
           else:
               raise SystemExit(
-                  "TASK 195 FAIL: execution was not blocked"
-              )
-
-          confirmed = controller.confirm_stopped()
-
-          if confirmed.state != EmergencyStopState.STOPPED:
-              raise SystemExit(
-                  "TASK 195 FAIL: STOPPED state not reached"
-              )
-
-          if not confirmed.stopped:
-              raise SystemExit(
-                  "TASK 195 FAIL: stopped flag missing"
+                  "TASK 195 FAIL: stopped controller passed readiness gate"
               )
 
           print("TASK 195 PASS")
-
           PY
 
       - name: Verify no bytecode changes
