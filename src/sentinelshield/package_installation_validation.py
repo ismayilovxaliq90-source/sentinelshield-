@@ -222,6 +222,26 @@ def validate_installation_request(
                 "Installation workspace must not be inside repository"
             )
 
+    if request.environment:
+        forbidden = {
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "NODE_OPTIONS",
+        }
+
+        for key, value in request.environment.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise PackageInstallationValidationError(
+                    "Environment keys and values must be strings"
+                )
+
+            if key in forbidden:
+                raise PackageInstallationValidationError(
+                    f"Forbidden environment variable: {key}"
+                )
+
     if manager == "npm":
         package_json = workspace / "package.json"
 
