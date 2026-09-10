@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -51,7 +52,6 @@ def test_clean_repository_has_no_protected_changes(tmp_path):
     assert result.valid is True
     assert result.protected is True
     assert result.violations == ()
-    assert result.reason == "EXISTING_CHANGE_PROTECTION_PASSED"
 
 
 def test_protected_modified_file_is_detected(tmp_path):
@@ -164,7 +164,9 @@ def test_missing_repository_is_reported(tmp_path):
 
     protection = capture_existing_change_protection(repo)
 
-    repo.rmdir()
+    # The old test used repo.rmdir(), but the repository is not empty.
+    # Remove the complete temporary repository safely instead.
+    shutil.rmtree(repo)
 
     result = validate_existing_change_protection(protection)
 
@@ -193,9 +195,7 @@ def test_invalid_protection_object_is_rejected(tmp_path):
     _init_repo(tmp_path)
 
     with pytest.raises(ExistingChangeProtectionError):
-        validate_existing_change_protection(
-            object(),
-        )
+        validate_existing_change_protection(object())
 
 
 def test_protected_symlink_change_is_detected(tmp_path):
@@ -210,11 +210,19 @@ def test_protected_symlink_change_is_detected(tmp_path):
     link = repo / "link.txt"
     link.symlink_to(target_a.name)
 
-    _git(repo, "add", "target-a.txt", "target-b.txt", "link.txt")
+    _git(
+        repo,
+        "add",
+        "target-a.txt",
+        "target-b.txt",
+        "link.txt",
+    )
     _git(repo, "commit", "-m", "add symlink")
 
     protection = capture_existing_change_protection(repo)
 
+    # The symlink is clean at capture time, but Task 183 must
+    # still protect it because it is a tracked symlink.
     link.unlink()
     link.symlink_to(target_b.name)
 

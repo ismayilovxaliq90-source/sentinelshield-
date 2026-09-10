@@ -5,7 +5,6 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
-from typing import Optional
 
 
 class ExistingChangeProtectionError(RuntimeError):
@@ -33,15 +32,11 @@ class ProtectionValidationResult:
     reason: str
 
 
-def _git(
-    repository_root: Path,
-    *arguments: str,
-    timeout: float,
-) -> str:
+def _git(root: Path, *args: str, timeout: float) -> str:
     try:
-        completed = subprocess.run(
-            ("git", *arguments),
-            cwd=repository_root,
+        result = subprocess.run(
+            ("git", *args),
+            cwd=root,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -51,15 +46,15 @@ def _git(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ExistingChangeProtectionError(
-            "GIT_STATUS_UNAVAILABLE"
+            "GIT_COMMAND_UNAVAILABLE"
         ) from error
 
-    if completed.returncode != 0:
+    if result.returncode != 0:
         raise ExistingChangeProtectionError(
-            f"GIT_COMMAND_FAILED:{completed.stderr.strip()}"
+            f"GIT_COMMAND_FAILED:{result.stderr.strip()}"
         )
 
-    return completed.stdout
+    return result.stdout
 
 
 def _repository_root(
@@ -116,8 +111,6 @@ def _status_entries(
         status = line[:2]
         path_text = line[3:]
 
-        # Git may quote unusual paths.  For the protection mechanism
-        # we preserve Git's reported relative path exactly.
         if " -> " in path_text:
             path_text = path_text.split(" -> ", 1)[1]
 
@@ -133,9 +126,15 @@ def _status_entries(
 
 def _fingerprint(path: Path) -> str:
     try:
+        # lstat/readlink are essential here:
+        # symlink content must be fingerprinted as the link itself,
+        # not as its target.
         if path.is_symlink():
             target = os.readlink(path)
-            payload = f"SYMLINK\0{target}".encode("utf-8", "surrogateescape")
+            payload = (
+                b"SYMLINK\0"
+                + target.encode("utf-8", "surrogateescape")
+            )
             return hashlib.sha256(payload).hexdigest()
 
         if path.is_file():
@@ -155,34 +154,25 @@ def _fingerprint(path: Path) -> str:
             digest = hashlib.sha256()
             digest.update(b"DIRECTORY\0")
 
-            try:
-                children = sorted(
-                    path.iterdir(),
-                    key=lambda item: item.name,
+            for child in sorted(
+                path.iterdir(),
+                key=lambda item: item.name,
+            ):
+                digest.update(
+                    child.name.encode(
+                        "utf-8",
+                        "surrogateescape",
+                    )
                 )
-            except OSError as error:
-                raise ExistingChangeProtectionError(
-                    "DIRECTORY_INSPECTION_FAILED"
-                ) from error
-
-            for child in children:
-                digest.update(child.name.encode(
-                    "utf-8",
-                    "surrogateescape",
-                ))
                 digest.update(b"\0")
-                digest.update(_fingerprint(child).encode("ascii"))
+                digest.update(
+                    _fingerprint(child).encode("ascii")
+                )
                 digest.update(b"\0")
 
             return digest.hexdigest()
 
-        try:
-            stat_result = path.stat()
-        except OSError as error:
-            raise ExistingChangeProtectionError(
-                "PATH_STAT_FAILED"
-            ) from error
-
+        stat_result = path.lstat()
         payload = (
             f"OTHER\0{stat_result.st_mode}\0"
             f"{stat_result.st_size}\0"
@@ -190,12 +180,30 @@ def _fingerprint(path: Path) -> str:
 
         return hashlib.sha256(payload).hexdigest()
 
-    except ExistingChangeProtectionError:
-        raise
     except OSError as error:
         raise ExistingChangeProtectionError(
             f"FINGERPRINT_FAILED:{path}"
         ) from error
+
+
+def _tracked_paths(
+    root: Path,
+    timeout: float,
+) -> tuple[str, ...]:
+    output = _git(
+        root,
+        "ls-files",
+        "-z",
+        timeout=timeout,
+    )
+
+    paths = tuple(
+        item
+        for item in output.split("\0")
+        if item
+    )
+
+    return paths
 
 
 def capture_existing_change_protection(
@@ -208,18 +216,40 @@ def capture_existing_change_protection(
         )
 
     root = _repository_root(start_path, timeout)
-    entries = _status_entries(root, timeout)
+
+    status_entries = _status_entries(root, timeout)
+    protected_paths = {
+        relative_path
+        for relative_path, _ in status_entries
+    }
+
+    # Important:
+    # Existing tracked symlinks must also be protected even when
+    # git status is clean. Otherwise changing a clean symlink target
+    # would be invisible to the protection layer.
+    for relative_path in _tracked_paths(root, timeout):
+        candidate = root / relative_path
+
+        if candidate.is_symlink():
+            protected_paths.add(relative_path)
 
     changes: list[ProtectedChange] = []
 
-    for relative_path, status in entries:
+    status_map = dict(status_entries)
+
+    for relative_path in sorted(protected_paths):
         candidate = root / relative_path
+
+        if not candidate.exists() and not candidate.is_symlink():
+            fingerprint = "<MISSING>"
+        else:
+            fingerprint = _fingerprint(candidate)
 
         changes.append(
             ProtectedChange(
                 relative_path=relative_path,
-                status=status,
-                fingerprint=_fingerprint(candidate),
+                status=status_map.get(relative_path, "  "),
+                fingerprint=fingerprint,
             )
         )
 
@@ -266,22 +296,17 @@ def validate_existing_change_protection(
         relative_path = protected.relative_path
         candidate = root / relative_path
 
-        # CRITICAL FIX:
-        # A protected file that was deleted must be reported explicitly
-        # as missing.  Do this before status/fingerprint comparison.
+        # Explicit deletion detection.
         if not candidate.exists() and not candidate.is_symlink():
             violations.append(
                 f"PROTECTED_CHANGE_MISSING:{relative_path}"
             )
             continue
 
-        current_status = current_entries.get(relative_path)
-
-        if current_status is None:
-            violations.append(
-                f"PROTECTED_CHANGE_MISSING:{relative_path}"
-            )
-            continue
+        current_status = current_entries.get(
+            relative_path,
+            "  ",
+        )
 
         if current_status != protected.status:
             violations.append(
