@@ -9,26 +9,17 @@ from typing import Mapping
 
 
 class PackageInstallationValidationError(RuntimeError):
-    """Raised when package installation validation cannot be performed safely."""
+    """Raised when package installation validation is unsafe or invalid."""
 
 
 SUPPORTED_MANAGERS = frozenset({"npm"})
 
-MANIFESTS = {
-    "npm": "package.json",
-}
+MANIFEST_NAME = "package.json"
+LOCKFILE_NAME = "package-lock.json"
+INSTALLATION_DIR = "node_modules"
 
-LOCKFILES = {
-    "npm": "package-lock.json",
-}
-
-
-@dataclass(frozen=True)
-class PackageInstallationRequest:
-    repository_root: Path
-    manager: str = "npm"
-    timeout: float = 300.0
-    environment: Mapping[str, str] | None = None
+DEFAULT_TIMEOUT = 300.0
+MAX_TIMEOUT = 1800.0
 
 
 @dataclass(frozen=True)
@@ -37,7 +28,7 @@ class InstalledPackage:
     version: str
     path: Path
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str]:
         return {
             "name": self.name,
             "version": self.version,
@@ -46,14 +37,21 @@ class InstalledPackage:
 
 
 @dataclass(frozen=True)
+class PackageInstallationRequest:
+    repository_root: Path
+    manager: str = "npm"
+    timeout: float = DEFAULT_TIMEOUT
+    environment: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class PackageInstallationResult:
     success: bool
     manager: str
     command: tuple[str, ...]
     returncode: int | None
-    installed: tuple[InstalledPackage, ...]
-    expected_dependency_count: int
-    actual_dependency_count: int
+    expected_packages: tuple[str, ...]
+    installed_packages: tuple[InstalledPackage, ...]
     lockfile_present: bool
     installation_directory_present: bool
     stdout: str
@@ -67,12 +65,11 @@ class PackageInstallationResult:
             "manager": self.manager,
             "command": list(self.command),
             "returncode": self.returncode,
-            "installed": [
+            "expected_packages": list(self.expected_packages),
+            "installed_packages": [
                 package.to_dict()
-                for package in self.installed
+                for package in self.installed_packages
             ],
-            "expected_dependency_count": self.expected_dependency_count,
-            "actual_dependency_count": self.actual_dependency_count,
             "lockfile_present": self.lockfile_present,
             "installation_directory_present": (
                 self.installation_directory_present
@@ -84,17 +81,17 @@ class PackageInstallationResult:
         }
 
 
-def _resolve_root(path: Path) -> Path:
-    if not isinstance(path, Path):
+def _resolve_root(repository_root: Path) -> Path:
+    if not isinstance(repository_root, Path):
         raise PackageInstallationValidationError(
-            "repository_root must be a Path"
+            "repository_root must be a pathlib.Path"
         )
 
     try:
-        root = path.expanduser().resolve(strict=True)
+        root = repository_root.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise PackageInstallationValidationError(
-            f"Unable to resolve repository root: {path}"
+            f"Unable to resolve repository root: {repository_root}"
         ) from exc
 
     if not root.is_dir():
@@ -104,13 +101,13 @@ def _resolve_root(path: Path) -> Path:
 
     if not (root / ".git").exists():
         raise PackageInstallationValidationError(
-            f"Not a Git repository: {root}"
+            f"Repository is not a Git repository: {root}"
         )
 
     return root
 
 
-def _validate_manager(manager: str) -> str:
+def _normalize_manager(manager: str) -> str:
     if not isinstance(manager, str):
         raise PackageInstallationValidationError(
             "manager must be a string"
@@ -129,7 +126,7 @@ def _validate_manager(manager: str) -> str:
 def _validate_timeout(timeout: float) -> None:
     if isinstance(timeout, bool):
         raise PackageInstallationValidationError(
-            "Invalid timeout"
+            "timeout must not be boolean"
         )
 
     if not isinstance(timeout, (int, float)):
@@ -137,14 +134,14 @@ def _validate_timeout(timeout: float) -> None:
             "timeout must be numeric"
         )
 
-    if timeout <= 0 or timeout > 1800:
+    if timeout <= 0 or timeout > MAX_TIMEOUT:
         raise PackageInstallationValidationError(
-            "timeout must be between 0 and 1800 seconds"
+            f"timeout must be between 0 and {MAX_TIMEOUT} seconds"
         )
 
 
-def _regular_file(root: Path, relative: str) -> Path:
-    path = root / relative
+def _regular_file(root: Path, relative_name: str) -> Path:
+    path = root / relative_name
 
     if path.is_symlink():
         raise PackageInstallationValidationError(
@@ -155,19 +152,19 @@ def _regular_file(root: Path, relative: str) -> Path:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise PackageInstallationValidationError(
-            f"Unable to resolve required file: {path}"
+            f"Unable to resolve file: {path}"
         ) from exc
 
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise PackageInstallationValidationError(
-            f"Required file escapes repository: {path}"
+            f"Path escapes repository: {path}"
         ) from exc
 
     if not resolved.is_file():
         raise PackageInstallationValidationError(
-            f"Required file is not regular: {path}"
+            f"Not a regular file: {path}"
         )
 
     return resolved
@@ -178,16 +175,17 @@ def validate_request(
 ) -> Path:
     if not isinstance(request, PackageInstallationRequest):
         raise PackageInstallationValidationError(
-            "Invalid package installation request"
+            "Invalid installation request"
         )
 
-    manager = _validate_manager(request.manager)
+    manager = _normalize_manager(request.manager)
     _validate_timeout(request.timeout)
 
     root = _resolve_root(request.repository_root)
 
-    _regular_file(root, MANIFESTS[manager])
-    _regular_file(root, LOCKFILES[manager])
+    if manager == "npm":
+        _regular_file(root, MANIFEST_NAME)
+        _regular_file(root, LOCKFILE_NAME)
 
     return root
 
@@ -195,7 +193,7 @@ def validate_request(
 def build_installation_command(
     manager: str,
 ) -> tuple[str, ...]:
-    manager = _validate_manager(manager)
+    manager = _normalize_manager(manager)
 
     if manager == "npm":
         return (
@@ -207,11 +205,11 @@ def build_installation_command(
         )
 
     raise PackageInstallationValidationError(
-        f"No installation command for manager: {manager}"
+        f"Installation command unavailable for: {manager}"
     )
 
 
-def _safe_environment(
+def _build_environment(
     request: PackageInstallationRequest,
 ) -> dict[str, str]:
     environment = {
@@ -234,16 +232,16 @@ def _safe_environment(
         "ENV",
     }
 
-    if request.environment:
+    if request.environment is not None:
         for key, value in request.environment.items():
             if not isinstance(key, str):
                 raise PackageInstallationValidationError(
-                    "Environment variable name must be a string"
+                    "Environment key must be a string"
                 )
 
             if not isinstance(value, str):
                 raise PackageInstallationValidationError(
-                    "Environment variable value must be a string"
+                    "Environment value must be a string"
                 )
 
             if key in forbidden:
@@ -256,8 +254,8 @@ def _safe_environment(
     return environment
 
 
-def _load_package_json(root: Path) -> dict:
-    manifest = _regular_file(root, "package.json")
+def _load_manifest(root: Path) -> dict:
+    manifest = _regular_file(root, MANIFEST_NAME)
 
     try:
         data = json.loads(
@@ -265,7 +263,7 @@ def _load_package_json(root: Path) -> dict:
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise PackageInstallationValidationError(
-            "Unable to parse package.json"
+            "Invalid package.json"
         ) from exc
 
     if not isinstance(data, dict):
@@ -276,10 +274,10 @@ def _load_package_json(root: Path) -> dict:
     return data
 
 
-def _expected_dependencies(root: Path) -> set[str]:
-    manifest = _load_package_json(root)
+def expected_dependency_names(root: Path) -> tuple[str, ...]:
+    manifest = _load_manifest(root)
 
-    result: set[str] = set()
+    names: set[str] = set()
 
     for field in (
         "dependencies",
@@ -289,22 +287,22 @@ def _expected_dependencies(root: Path) -> set[str]:
 
         if not isinstance(value, dict):
             raise PackageInstallationValidationError(
-                f"{field} must be an object"
+                f"{field} must be a JSON object"
             )
 
-        result.update(
-            str(name)
-            for name in value
-            if isinstance(name, str)
-        )
+        for name in value:
+            if not isinstance(name, str) or not name.strip():
+                raise PackageInstallationValidationError(
+                    f"Invalid dependency name in {field}"
+                )
 
-    return result
+            names.add(name)
+
+    return tuple(sorted(names))
 
 
-def _validate_installation_directory(
-    root: Path,
-) -> Path:
-    node_modules = root / "node_modules"
+def _validate_node_modules(root: Path) -> Path:
+    node_modules = root / INSTALLATION_DIR
 
     if node_modules.is_symlink():
         raise PackageInstallationValidationError(
@@ -322,7 +320,7 @@ def _validate_installation_directory(
         resolved.relative_to(root)
     except ValueError as exc:
         raise PackageInstallationValidationError(
-            "node_modules escapes repository"
+            "node_modules escapes repository root"
         ) from exc
 
     if not resolved.is_dir():
@@ -333,24 +331,97 @@ def _validate_installation_directory(
     return resolved
 
 
-def _read_installed_packages(
+def _read_package_metadata(
+    package_directory: Path,
+) -> tuple[str, str]:
+    metadata_file = package_directory / "package.json"
+
+    if metadata_file.is_symlink():
+        raise PackageInstallationValidationError(
+            f"Package metadata is a symlink: {metadata_file}"
+        )
+
+    if not metadata_file.is_file():
+        raise PackageInstallationValidationError(
+            f"Package metadata missing: {metadata_file}"
+        )
+
+    try:
+        metadata = json.loads(
+            metadata_file.read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PackageInstallationValidationError(
+            f"Invalid package metadata: {metadata_file}"
+        ) from exc
+
+    if not isinstance(metadata, dict):
+        raise PackageInstallationValidationError(
+            f"Invalid package metadata object: {metadata_file}"
+        )
+
+    name = metadata.get("name")
+    version = metadata.get("version")
+
+    if not isinstance(name, str) or not name:
+        raise PackageInstallationValidationError(
+            f"Invalid package name: {metadata_file}"
+        )
+
+    if not isinstance(version, str) or not version:
+        raise PackageInstallationValidationError(
+            f"Invalid package version: {metadata_file}"
+        )
+
+    return name, version
+
+
+def _package_directory(
+    node_modules: Path,
+    package_name: str,
+) -> Path:
+    if package_name.startswith("@"):
+        parts = package_name.split("/", 1)
+
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise PackageInstallationValidationError(
+                f"Invalid scoped package name: {package_name}"
+            )
+
+        return node_modules / parts[0] / parts[1]
+
+    if "/" in package_name or "\\" in package_name:
+        raise PackageInstallationValidationError(
+            f"Invalid package name: {package_name}"
+        )
+
+    return node_modules / package_name
+
+
+def discover_installed_packages(
     root: Path,
-    expected_names: set[str],
+    expected: tuple[str, ...] | None = None,
 ) -> tuple[InstalledPackage, ...]:
-    node_modules = _validate_installation_directory(root)
+    node_modules = _validate_node_modules(root)
+
+    if expected is None:
+        expected = expected_dependency_names(root)
 
     installed: list[InstalledPackage] = []
 
-    for name in sorted(expected_names):
-        package_path = node_modules / name
+    for name in expected:
+        package_directory = _package_directory(
+            node_modules,
+            name,
+        )
 
-        if package_path.is_symlink():
+        if package_directory.is_symlink():
             raise PackageInstallationValidationError(
                 f"Installed package is a symlink: {name}"
             )
 
         try:
-            resolved = package_path.resolve(strict=True)
+            resolved = package_directory.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
             raise PackageInstallationValidationError(
                 f"Expected package is missing: {name}"
@@ -363,39 +434,19 @@ def _read_installed_packages(
                 f"Installed package escapes node_modules: {name}"
             ) from exc
 
-        package_json = resolved / "package.json"
-
-        if not package_json.is_file():
+        if not resolved.is_dir():
             raise PackageInstallationValidationError(
-                f"Installed package metadata missing: {name}"
+                f"Installed package is not a directory: {name}"
             )
 
-        try:
-            metadata = json.loads(
-                package_json.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise PackageInstallationValidationError(
-                f"Invalid package metadata: {name}"
-            ) from exc
-
-        if not isinstance(metadata, dict):
-            raise PackageInstallationValidationError(
-                f"Invalid package metadata object: {name}"
-            )
-
-        actual_name = metadata.get("name")
-        version = metadata.get("version")
+        actual_name, version = _read_package_metadata(
+            resolved
+        )
 
         if actual_name != name:
             raise PackageInstallationValidationError(
                 f"Package name mismatch: expected {name}, "
-                f"got {actual_name!r}"
-            )
-
-        if not isinstance(version, str) or not version:
-            raise PackageInstallationValidationError(
-                f"Invalid installed version: {name}"
+                f"got {actual_name}"
             )
 
         installed.append(
@@ -409,110 +460,78 @@ def _read_installed_packages(
     return tuple(installed)
 
 
-def _npm_ls(
-    root: Path,
-    timeout: float,
-) -> tuple[int, str, str, bool]:
-    command = (
-        "npm",
-        "ls",
-        "--all",
-        "--json",
-        "--package-lock-only",
-    )
-
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=root,
-            env={
-                "PATH": os.environ.get("PATH", ""),
-                "HOME": os.environ.get("HOME", ""),
-                "LANG": "C.UTF-8",
-                "LC_ALL": "C.UTF-8",
-                "CI": "true",
-                "NPM_CONFIG_AUDIT": "false",
-                "NPM_CONFIG_FUND": "false",
-                "PYTHONDONTWRITEBYTECODE": "1",
-            },
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=False,
-            check=False,
-            close_fds=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = (
-            exc.stdout.decode(errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        stderr = (
-            exc.stderr.decode(errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else (exc.stderr or "")
-        )
-        return -1, stdout, stderr, True
-    except OSError as exc:
-        return -1, "", str(exc), False
-
-    return (
-        completed.returncode,
-        completed.stdout,
-        completed.stderr,
-        False,
-    )
-
-
 def validate_installed_state(
     root: Path,
 ) -> PackageInstallationResult:
-    expected = _expected_dependencies(root)
+    manager = "npm"
+    command = build_installation_command(manager)
 
     try:
-        installed = _read_installed_packages(
+        root = _resolve_root(root)
+
+        expected = expected_dependency_names(root)
+
+        _regular_file(root, LOCKFILE_NAME)
+
+        installed = discover_installed_packages(
             root,
             expected,
         )
+
+        if len(installed) != len(expected):
+            return PackageInstallationResult(
+                success=False,
+                manager=manager,
+                command=command,
+                returncode=0,
+                expected_packages=expected,
+                installed_packages=installed,
+                lockfile_present=True,
+                installation_directory_present=True,
+                stdout="",
+                stderr="",
+                timed_out=False,
+                error="INSTALLED_DEPENDENCY_COUNT_MISMATCH",
+            )
+
+        return PackageInstallationResult(
+            success=True,
+            manager=manager,
+            command=command,
+            returncode=0,
+            expected_packages=expected,
+            installed_packages=installed,
+            lockfile_present=True,
+            installation_directory_present=True,
+            stdout="",
+            stderr="",
+            timed_out=False,
+            error=None,
+        )
+
     except PackageInstallationValidationError as exc:
         return PackageInstallationResult(
             success=False,
-            manager="npm",
-            command=build_installation_command("npm"),
+            manager=manager,
+            command=command,
             returncode=None,
-            installed=(),
-            expected_dependency_count=len(expected),
-            actual_dependency_count=0,
-            lockfile_present=(root / "package-lock.json").is_file(),
+            expected_packages=(),
+            installed_packages=(),
+            lockfile_present=(
+                (root / LOCKFILE_NAME).is_file()
+                if isinstance(root, Path)
+                else False
+            ),
             installation_directory_present=(
-                (root / "node_modules").is_dir()
+                (root / INSTALLATION_DIR).is_dir()
+                if isinstance(root, Path)
+                else False
             ),
             stdout="",
             stderr="",
             timed_out=False,
             error=str(exc),
         )
-
-    return PackageInstallationResult(
-        success=True,
-        manager="npm",
-        command=build_installation_command("npm"),
-        returncode=0,
-        installed=installed,
-        expected_dependency_count=len(expected),
-        actual_dependency_count=len(installed),
-        lockfile_present=(root / "package-lock.json").is_file(),
-        installation_directory_present=True,
-        stdout="",
-        stderr="",
-        timed_out=False,
-        error=None,
-    )
 
 
 def validate_installation_result(
@@ -540,13 +559,18 @@ def validate_installation_result(
         if not result.installation_directory_present:
             return False
 
-        if result.actual_dependency_count != (
-            result.expected_dependency_count
+        if len(result.expected_packages) != (
+            len(result.installed_packages)
         ):
             return False
 
-        if len(result.installed) != result.actual_dependency_count:
-            return False
+        for package in result.installed_packages:
+            if not package.name:
+                return False
+            if not package.version:
+                return False
+            if not isinstance(package.path, Path):
+                return False
 
     return True
 
@@ -555,9 +579,12 @@ def install_and_validate(
     request: PackageInstallationRequest,
 ) -> PackageInstallationResult:
     root = validate_request(request)
-    manager = _validate_manager(request.manager)
+
+    manager = _normalize_manager(request.manager)
     command = build_installation_command(manager)
-    environment = _safe_environment(request)
+    environment = _build_environment(request)
+
+    expected = expected_dependency_names(root)
 
     try:
         completed = subprocess.run(
@@ -581,6 +608,7 @@ def install_and_validate(
             if isinstance(exc.stdout, bytes)
             else (exc.stdout or "")
         )
+
         stderr = (
             exc.stderr.decode(errors="replace")
             if isinstance(exc.stderr, bytes)
@@ -592,13 +620,14 @@ def install_and_validate(
             manager=manager,
             command=command,
             returncode=None,
-            installed=(),
-            expected_dependency_count=0,
-            actual_dependency_count=0,
+            expected_packages=expected,
+            installed_packages=(),
             lockfile_present=(
-                root / LOCKFILES[manager]
-            ).is_file(),
-            installation_directory_present=False,
+                (root / LOCKFILE_NAME).is_file()
+            ),
+            installation_directory_present=(
+                (root / INSTALLATION_DIR).is_dir()
+            ),
             stdout=stdout,
             stderr=stderr,
             timed_out=True,
@@ -610,13 +639,14 @@ def install_and_validate(
             manager=manager,
             command=command,
             returncode=None,
-            installed=(),
-            expected_dependency_count=0,
-            actual_dependency_count=0,
+            expected_packages=expected,
+            installed_packages=(),
             lockfile_present=(
-                root / LOCKFILES[manager]
-            ).is_file(),
-            installation_directory_present=False,
+                (root / LOCKFILE_NAME).is_file()
+            ),
+            installation_directory_present=(
+                (root / INSTALLATION_DIR).is_dir()
+            ),
             stdout="",
             stderr=str(exc),
             timed_out=False,
@@ -629,14 +659,13 @@ def install_and_validate(
             manager=manager,
             command=command,
             returncode=completed.returncode,
-            installed=(),
-            expected_dependency_count=0,
-            actual_dependency_count=0,
+            expected_packages=expected,
+            installed_packages=(),
             lockfile_present=(
-                root / LOCKFILES[manager]
-            ).is_file(),
+                (root / LOCKFILE_NAME).is_file()
+            ),
             installation_directory_present=(
-                (root / "node_modules").is_dir()
+                (root / INSTALLATION_DIR).is_dir()
             ),
             stdout=completed.stdout,
             stderr=completed.stderr,
@@ -644,35 +673,39 @@ def install_and_validate(
             error="PACKAGE_INSTALLATION_FAILED",
         )
 
-    result = validate_installed_state(root)
+    validation = validate_installed_state(root)
 
     return PackageInstallationResult(
-        success=result.success,
+        success=validation.success,
         manager=manager,
         command=command,
         returncode=completed.returncode,
-        installed=result.installed,
-        expected_dependency_count=result.expected_dependency_count,
-        actual_dependency_count=result.actual_dependency_count,
-        lockfile_present=result.lockfile_present,
+        expected_packages=validation.expected_packages,
+        installed_packages=validation.installed_packages,
+        lockfile_present=validation.lockfile_present,
         installation_directory_present=(
-            result.installation_directory_present
+            validation.installation_directory_present
         ),
         stdout=completed.stdout,
         stderr=completed.stderr,
         timed_out=False,
-        error=result.error,
+        error=validation.error,
     )
 
 
 __all__ = [
     "PackageInstallationValidationError",
-    "PackageInstallationRequest",
     "InstalledPackage",
+    "PackageInstallationRequest",
     "PackageInstallationResult",
     "SUPPORTED_MANAGERS",
+    "MANIFEST_NAME",
+    "LOCKFILE_NAME",
+    "INSTALLATION_DIR",
     "build_installation_command",
     "validate_request",
+    "expected_dependency_names",
+    "discover_installed_packages",
     "validate_installed_state",
     "validate_installation_result",
     "install_and_validate",
