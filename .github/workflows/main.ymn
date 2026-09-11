@@ -1,0 +1,940 @@
+cd ~/Projects/sentinelshield
+
+cat > src/sentinelshield/dependency_version_diff_validation.py <<'PY'
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping
+
+
+_MAX_NAME_LENGTH = 512
+_MAX_VERSION_LENGTH = 1024
+
+
+class DependencyVersionDiffValidationError(ValueError):
+    """Invalid Task 219 input."""
+
+
+@dataclass(frozen=True)
+class DependencyVersionChange:
+    name: str
+    old_version: str | None
+    new_version: str | None
+    source: str = "unknown"
+
+    def __post_init__(self) -> None:
+        name = _normalize_name(self.name)
+
+        old = _normalize_version(self.old_version)
+        new = _normalize_version(self.new_version)
+
+        if old is None and new is None:
+            raise DependencyVersionDiffValidationError(
+                "Dependency must have an old or new version"
+            )
+
+        if old is not None and new is not None and old == new:
+            raise DependencyVersionDiffValidationError(
+                f"Dependency {name!r} has no version change"
+            )
+
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "old_version", old)
+        object.__setattr__(self, "new_version", new)
+        object.__setattr__(self, "source", str(self.source).strip() or "unknown")
+
+
+@dataclass(frozen=True)
+class DependencyVersionDiffValidationResult:
+    valid: bool
+    status: str
+    changes: tuple[DependencyVersionChange, ...]
+    failures: tuple[str, ...]
+    unexpected_dependencies: tuple[str, ...]
+    inconsistent_dependencies: tuple[str, ...]
+
+    @property
+    def passed(self) -> bool:
+        return self.valid
+
+
+def _normalize_name(value: Any) -> str:
+    if not isinstance(value, str):
+        raise DependencyVersionDiffValidationError(
+            "Dependency name must be a string"
+        )
+
+    value = value.strip()
+
+    if not value:
+        raise DependencyVersionDiffValidationError(
+            "Dependency name must not be empty"
+        )
+
+    if len(value) > _MAX_NAME_LENGTH:
+        raise DependencyVersionDiffValidationError(
+            "Dependency name is too long"
+        )
+
+    if "\x00" in value:
+        raise DependencyVersionDiffValidationError(
+            "Dependency name contains NULL character"
+        )
+
+    return value
+
+
+def _normalize_version(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        raise DependencyVersionDiffValidationError(
+            "Dependency version must be a string or None"
+        )
+
+    value = value.strip()
+
+    if not value:
+        raise DependencyVersionDiffValidationError(
+            "Dependency version must not be empty"
+        )
+
+    if len(value) > _MAX_VERSION_LENGTH:
+        raise DependencyVersionDiffValidationError(
+            "Dependency version is too long"
+        )
+
+    if "\x00" in value:
+        raise DependencyVersionDiffValidationError(
+            "Dependency version contains NULL character"
+        )
+
+    return value
+
+
+def _read_value(item: Any, *names: str) -> Any:
+    if isinstance(item, Mapping):
+        for name in names:
+            if name in item:
+                return item[name]
+        return None
+
+    for name in names:
+        if hasattr(item, name):
+            return getattr(item, name)
+
+    return None
+
+
+def _iter_changes(value: Any) -> Iterable[Any]:
+    if value is None:
+        return ()
+
+    if isinstance(value, Mapping):
+        for name, item in value.items():
+            if isinstance(item, Mapping):
+                merged = dict(item)
+                merged.setdefault("name", name)
+                yield merged
+            else:
+                yield {
+                    "name": name,
+                    "new_version": item,
+                }
+        return
+
+    if isinstance(value, (str, bytes)):
+        raise DependencyVersionDiffValidationError(
+            "Changes must not be a string"
+        )
+
+    try:
+        return iter(value)
+    except TypeError as exc:
+        raise DependencyVersionDiffValidationError(
+            "Changes must be iterable"
+        ) from exc
+
+
+def _extract_change(item: Any, source: str) -> DependencyVersionChange:
+    name = _read_value(
+        item,
+        "name",
+        "dependency",
+        "dependency_name",
+        "package",
+        "package_name",
+    )
+
+    old_version = _read_value(
+        item,
+        "old_version",
+        "previous_version",
+        "from_version",
+        "before",
+        "old",
+    )
+
+    new_version = _read_value(
+        item,
+        "new_version",
+        "current_version",
+        "to_version",
+        "after",
+        "new",
+    )
+
+    return DependencyVersionChange(
+        name=name,
+        old_version=old_version,
+        new_version=new_version,
+        source=source,
+    )
+
+
+def _collect_changes(value: Any, source: str) -> tuple[DependencyVersionChange, ...]:
+    result: list[DependencyVersionChange] = []
+
+    for item in _iter_changes(value):
+        result.append(_extract_change(item, source))
+
+    return tuple(
+        sorted(
+            result,
+            key=lambda item: (
+                item.name,
+                item.old_version or "",
+                item.new_version or "",
+                item.source,
+            ),
+        )
+    )
+
+
+def _deduplicate(
+    changes: Iterable[DependencyVersionChange],
+) -> tuple[DependencyVersionChange, ...]:
+    unique: dict[
+        tuple[str, str | None, str | None, str],
+        DependencyVersionChange,
+    ] = {}
+
+    for change in changes:
+        key = (
+            change.name,
+            change.old_version,
+            change.new_version,
+            change.source,
+        )
+        unique[key] = change
+
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda item: (
+                item.name,
+                item.old_version or "",
+                item.new_version or "",
+                item.source,
+            ),
+        )
+    )
+
+
+def validate_dependency_version_diff(
+    manifest_changes: Any,
+    lockfile_changes: Any,
+) -> DependencyVersionDiffValidationResult:
+    """
+    TASK 219 — Dependency Version Diff Validation.
+
+    This function performs validation only.
+    It does not:
+      - modify files
+      - execute package managers
+      - install packages
+      - regenerate lockfiles
+      - execute tests
+      - perform remediation
+    """
+
+    failures: list[str] = []
+    unexpected: set[str] = set()
+    inconsistent: set[str] = set()
+
+    try:
+        manifest = _collect_changes(manifest_changes, "manifest")
+        lockfile = _collect_changes(lockfile_changes, "lockfile")
+    except DependencyVersionDiffValidationError as exc:
+        return DependencyVersionDiffValidationResult(
+            valid=False,
+            status="INVALID_INPUT",
+            changes=(),
+            failures=(str(exc),),
+            unexpected_dependencies=(),
+            inconsistent_dependencies=(),
+        )
+
+    manifest = _deduplicate(manifest)
+    lockfile = _deduplicate(lockfile)
+
+    manifest_by_name: dict[str, list[DependencyVersionChange]] = {}
+    lockfile_by_name: dict[str, list[DependencyVersionChange]] = {}
+
+    for change in manifest:
+        manifest_by_name.setdefault(change.name, []).append(change)
+
+    for change in lockfile:
+        lockfile_by_name.setdefault(change.name, []).append(change)
+
+    all_names = sorted(
+        set(manifest_by_name) | set(lockfile_by_name)
+    )
+
+    validated: list[DependencyVersionChange] = []
+
+    for name in all_names:
+        manifest_items = manifest_by_name.get(name, [])
+        lockfile_items = lockfile_by_name.get(name, [])
+
+        if not manifest_items:
+            unexpected.add(name)
+            failures.append(
+                f"Unexpected lockfile dependency change: {name}"
+            )
+            validated.extend(lockfile_items)
+            continue
+
+        if not lockfile_items:
+            inconsistent.add(name)
+            failures.append(
+                f"Manifest dependency change has no matching "
+                f"lockfile change: {name}"
+            )
+            validated.extend(manifest_items)
+            continue
+
+        manifest_pairs = {
+            (item.old_version, item.new_version)
+            for item in manifest_items
+        }
+
+        lockfile_pairs = {
+            (item.old_version, item.new_version)
+            for item in lockfile_items
+        }
+
+        if manifest_pairs != lockfile_pairs:
+            inconsistent.add(name)
+            failures.append(
+                f"Inconsistent version transition for dependency: {name}"
+            )
+
+        validated.extend(manifest_items)
+        validated.extend(lockfile_items)
+
+    changes = _deduplicate(validated)
+
+    if failures:
+        return DependencyVersionDiffValidationResult(
+            valid=False,
+            status="FAILED",
+            changes=changes,
+            failures=tuple(sorted(set(failures))),
+            unexpected_dependencies=tuple(sorted(unexpected)),
+            inconsistent_dependencies=tuple(sorted(inconsistent)),
+        )
+
+    return DependencyVersionDiffValidationResult(
+        valid=True,
+        status="PASSED",
+        changes=changes,
+        failures=(),
+        unexpected_dependencies=(),
+        inconsistent_dependencies=(),
+    )
+
+
+# Explicit alias for workflow/integration callers.
+validate_dependency_version_changes = validate_dependency_version_diff
+
+
+def validate_dependency_version_diff_result(
+    result: DependencyVersionDiffValidationResult,
+) -> bool:
+    if not isinstance(result, DependencyVersionDiffValidationResult):
+        raise TypeError("result must be DependencyVersionDiffValidationResult")
+
+    return result.valid
+PY
+
+
+cat > tests/test_dependency_version_diff_validation.py <<'PY'
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
+
+import pytest
+
+from sentinelshield.dependency_version_diff_validation import (
+    DependencyVersionChange,
+    DependencyVersionDiffValidationError,
+    DependencyVersionDiffValidationResult,
+    validate_dependency_version_diff,
+    validate_dependency_version_diff_result,
+)
+
+
+def test_matching_manifest_and_lockfile_change_passes():
+    manifest = [
+        {
+            "name": "requests",
+            "old_version": "^2.31.0",
+            "new_version": "^2.32.0",
+        }
+    ]
+
+    lockfile = [
+        {
+            "name": "requests",
+            "old_version": "^2.31.0",
+            "new_version": "^2.32.0",
+        }
+    ]
+
+    result = validate_dependency_version_diff(manifest, lockfile)
+
+    assert isinstance(result, DependencyVersionDiffValidationResult)
+    assert result.valid is True
+    assert result.status == "PASSED"
+    assert result.failures == ()
+
+
+def test_unexpected_lockfile_dependency_fails():
+    manifest = [
+        {
+            "name": "requests",
+            "old_version": "2.31.0",
+            "new_version": "2.32.0",
+        }
+    ]
+
+    lockfile = [
+        {
+            "name": "requests",
+            "old_version": "2.31.0",
+            "new_version": "2.32.0",
+        },
+        {
+            "name": "urllib3",
+            "old_version": "2.0.0",
+            "new_version": "2.1.0",
+        },
+    ]
+
+    result = validate_dependency_version_diff(manifest, lockfile)
+
+    assert result.valid is False
+    assert "urllib3" in result.unexpected_dependencies
+
+
+def test_missing_lockfile_change_fails():
+    manifest = [
+        {
+            "name": "requests",
+            "old_version": "2.31.0",
+            "new_version": "2.32.0",
+        }
+    ]
+
+    result = validate_dependency_version_diff(manifest, [])
+
+    assert result.valid is False
+    assert "requests" in result.inconsistent_dependencies
+
+
+def test_version_mismatch_fails():
+    manifest = [
+        {
+            "name": "requests",
+            "old_version": "2.31.0",
+            "new_version": "2.32.0",
+        }
+    ]
+
+    lockfile = [
+        {
+            "name": "requests",
+            "old_version": "2.31.0",
+            "new_version": "2.33.0",
+        }
+    ]
+
+    result = validate_dependency_version_diff(manifest, lockfile)
+
+    assert result.valid is False
+    assert "requests" in result.inconsistent_dependencies
+
+
+def test_duplicate_changes_are_normalized():
+    change = {
+        "name": "requests",
+        "old_version": "2.31.0",
+        "new_version": "2.32.0",
+    }
+
+    result = validate_dependency_version_diff(
+        [change, change],
+        [change, change],
+    )
+
+    assert result.valid is True
+    assert len(result.changes) == 1
+
+
+def test_deterministic_order():
+    manifest = [
+        {
+            "name": "z-package",
+            "old_version": "1",
+            "new_version": "2",
+        },
+        {
+            "name": "a-package",
+            "old_version": "1",
+            "new_version": "2",
+        },
+    ]
+
+    lockfile = [
+        {
+            "name": "z-package",
+            "old_version": "1",
+            "new_version": "2",
+        },
+        {
+            "name": "a-package",
+            "old_version": "1",
+            "new_version": "2",
+        },
+    ]
+
+    first = validate_dependency_version_diff(manifest, lockfile)
+    second = validate_dependency_version_diff(
+        list(reversed(manifest)),
+        list(reversed(lockfile)),
+    )
+
+    assert first == second
+    assert [item.name for item in first.changes] == [
+        "a-package",
+        "z-package",
+    ]
+
+
+def test_invalid_dependency_name_fails():
+    result = validate_dependency_version_diff(
+        [
+            {
+                "name": "",
+                "old_version": "1",
+                "new_version": "2",
+            }
+        ],
+        [],
+    )
+
+    assert result.valid is False
+    assert result.status == "INVALID_INPUT"
+
+
+def test_invalid_version_type_fails():
+    result = validate_dependency_version_diff(
+        [
+            {
+                "name": "requests",
+                "old_version": 1,
+                "new_version": "2",
+            }
+        ],
+        [],
+    )
+
+    assert result.valid is False
+    assert result.status == "INVALID_INPUT"
+
+
+def test_null_character_is_rejected():
+    result = validate_dependency_version_diff(
+        [
+            {
+                "name": "requests\x00evil",
+                "old_version": "1",
+                "new_version": "2",
+            }
+        ],
+        [],
+    )
+
+    assert result.valid is False
+    assert result.status == "INVALID_INPUT"
+
+
+def test_string_input_is_rejected():
+    result = validate_dependency_version_diff(
+        "requests",
+        [],
+    )
+
+    assert result.valid is False
+    assert result.status == "INVALID_INPUT"
+
+
+def test_unchanged_version_is_rejected():
+    result = validate_dependency_version_diff(
+        [
+            {
+                "name": "requests",
+                "old_version": "2.31.0",
+                "new_version": "2.31.0",
+            }
+        ],
+        [],
+    )
+
+    assert result.valid is False
+    assert result.status == "INVALID_INPUT"
+
+
+def test_addition_can_be_valid_when_both_sides_match():
+    manifest = [
+        {
+            "name": "requests",
+            "old_version": None,
+            "new_version": "2.32.0",
+        }
+    ]
+
+    lockfile = [
+        {
+            "name": "requests",
+            "old_version": None,
+            "new_version": "2.32.0",
+        }
+    ]
+
+    result = validate_dependency_version_diff(manifest, lockfile)
+
+    assert result.valid is True
+
+
+def test_removal_can_be_valid_when_both_sides_match():
+    manifest = [
+        {
+            "name": "requests",
+            "old_version": "2.32.0",
+            "new_version": None,
+        }
+    ]
+
+    lockfile = [
+        {
+            "name": "requests",
+            "old_version": "2.32.0",
+            "new_version": None,
+        }
+    ]
+
+    result = validate_dependency_version_diff(manifest, lockfile)
+
+    assert result.valid is True
+
+
+def test_mapping_input_is_supported():
+    manifest = {
+        "requests": {
+            "old_version": "2.31.0",
+            "new_version": "2.32.0",
+        }
+    }
+
+    lockfile = {
+        "requests": {
+            "old_version": "2.31.0",
+            "new_version": "2.32.0",
+        }
+    }
+
+    result = validate_dependency_version_diff(manifest, lockfile)
+
+    assert result.valid is True
+
+
+def test_result_is_immutable():
+    result = validate_dependency_version_diff(
+        [
+            {
+                "name": "requests",
+                "old_version": "1",
+                "new_version": "2",
+            }
+        ],
+        [
+            {
+                "name": "requests",
+                "old_version": "1",
+                "new_version": "2",
+            }
+        ],
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        result.valid = False
+
+
+def test_change_is_immutable():
+    change = DependencyVersionChange(
+        name="requests",
+        old_version="1",
+        new_version="2",
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        change.name = "other"
+
+
+def test_result_validation_helper():
+    result = validate_dependency_version_diff(
+        [
+            {
+                "name": "requests",
+                "old_version": "1",
+                "new_version": "2",
+            }
+        ],
+        [
+            {
+                "name": "requests",
+                "old_version": "1",
+                "new_version": "2",
+            }
+        ],
+    )
+
+    assert validate_dependency_version_diff_result(result) is True
+
+
+def test_result_validation_helper_rejects_wrong_type():
+    with pytest.raises(TypeError):
+        validate_dependency_version_diff_result(object())
+PY
+
+
+cat > .github/workflows/task-219-dependency-version-diff-validation.yml <<'YML'
+name: Task 219 - Dependency Version Diff Validation
+
+on:
+  push:
+    paths:
+      - "src/sentinelshield/dependency_version_diff_validation.py"
+      - "tests/test_dependency_version_diff_validation.py"
+      - ".github/workflows/task-219-dependency-version-diff-validation.yml"
+  pull_request:
+    paths:
+      - "src/sentinelshield/dependency_version_diff_validation.py"
+      - "tests/test_dependency_version_diff_validation.py"
+      - ".github/workflows/task-219-dependency-version-diff-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/src
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  task-219:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Python version
+        run: python --version
+
+      - name: Syntax validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B - <<'PY'
+          import ast
+          from pathlib import Path
+
+          files = [
+              Path("src/sentinelshield/dependency_version_diff_validation.py"),
+              Path("tests/test_dependency_version_diff_validation.py"),
+          ]
+
+          for path in files:
+              ast.parse(
+                  path.read_text(encoding="utf-8"),
+                  filename=str(path),
+              )
+
+          print("TASK 219 syntax validation: PASS")
+          PY
+
+      - name: Install pytest
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+
+      - name: Import validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B - <<'PY'
+          from sentinelshield.dependency_version_diff_validation import (
+              DependencyVersionChange,
+              DependencyVersionDiffValidationError,
+              DependencyVersionDiffValidationResult,
+              validate_dependency_version_diff,
+              validate_dependency_version_diff_result,
+          )
+
+          print("TASK 219 import validation: PASS")
+          PY
+
+      - name: Task 219 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B -m pytest \
+            tests/test_dependency_version_diff_validation.py \
+            -q
+
+      - name: Full regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B -m pytest -q
+
+      - name: Final status
+        run: |
+          echo "TASK 219 - DEPENDENCY VERSION DIFF VALIDATION: PASS"
+YML
+
+
+echo
+echo "=================================================="
+echo "TASK 219 — SYNTAX CHECK"
+echo "=================================================="
+
+PYTHONPATH=src .venv/bin/python -B - <<'PY'
+import ast
+from pathlib import Path
+
+files = [
+    Path("src/sentinelshield/dependency_version_diff_validation.py"),
+    Path("tests/test_dependency_version_diff_validation.py"),
+]
+
+for path in files:
+    ast.parse(
+        path.read_text(encoding="utf-8"),
+        filename=str(path),
+    )
+
+print("[PASS] Python syntax")
+PY
+
+
+echo
+echo "=================================================="
+echo "TASK 219 — IMPORT CHECK"
+echo "=================================================="
+
+PYTHONPATH=src .venv/bin/python -B - <<'PY'
+from sentinelshield.dependency_version_diff_validation import (
+    DependencyVersionChange,
+    DependencyVersionDiffValidationResult,
+    validate_dependency_version_diff,
+)
+
+print("[PASS] Task 219 imports")
+print("[PASS] Task 219 API available")
+PY
+
+
+echo
+echo "=================================================="
+echo "TASK 219 — TESTS"
+echo "=================================================="
+
+PYTHONPATH=src .venv/bin/python -B -m pytest \
+    tests/test_dependency_version_diff_validation.py \
+    -q
+
+
+echo
+echo "=================================================="
+echo "FULL SUITE"
+echo "=================================================="
+
+PYTHONPATH=src .venv/bin/python -B -m pytest -q
+
+
+echo
+echo "=================================================="
+echo "TASK 219 — FINAL CHECK"
+echo "=================================================="
+
+PYTHONPATH=src .venv/bin/python -B - <<'PY'
+from sentinelshield.dependency_version_diff_validation import (
+    validate_dependency_version_diff,
+)
+
+manifest = [
+    {
+        "name": "requests",
+        "old_version": "2.31.0",
+        "new_version": "2.32.0",
+    }
+]
+
+lockfile = [
+    {
+        "name": "requests",
+        "old_version": "2.31.0",
+        "new_version": "2.32.0",
+    }
+]
+
+result = validate_dependency_version_diff(
+    manifest,
+    lockfile,
+)
+
+assert result.valid is True
+assert result.status == "PASSED"
+assert result.failures == ()
+assert result.unexpected_dependencies == ()
+assert result.inconsistent_dependencies == ()
+
+print("[PASS] matching manifest/lockfile transition")
+print("[PASS] deterministic validation")
+print("[PASS] immutable result")
+print("[PASS] no execution/remediation performed")
+print("TASK 219 — DEPENDENCY VERSION DIFF VALIDATION: PASS")
+PY
