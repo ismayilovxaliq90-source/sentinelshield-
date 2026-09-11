@@ -1,0 +1,711 @@
+name: SentinelShield Complete Validation
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  sentinelshield:
+    name: SentinelShield Full Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+
+      # ==========================================================
+      # 1. REAL REPOSITORY
+      # ==========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Repository information
+        run: |
+          echo "=============================================="
+          echo " SENTINELSHIELD COMPLETE VALIDATION"
+          echo "=============================================="
+          echo "Repository : $GITHUB_REPOSITORY"
+          echo "Commit     : $GITHUB_SHA"
+          echo "Branch     : $GITHUB_REF"
+          echo "Runner     : $RUNNER_OS"
+          echo
+          echo "Project root:"
+          pwd
+          echo
+          echo "Top-level contents:"
+          ls -la
+
+
+      # ==========================================================
+      # 2. PYTHON
+      # ==========================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify Python
+        run: |
+          python --version
+          python -m pip --version
+
+
+      # ==========================================================
+      # 3. ISOLATED SERVER ENVIRONMENT
+      # ==========================================================
+
+      - name: Create isolated validation environment
+        run: |
+          python -m venv .sentinelshield-ci
+
+          . .sentinelshield-ci/bin/activate
+
+          python --version
+          python -m pip --version
+
+
+      # ==========================================================
+      # 4. DEPENDENCIES
+      # ==========================================================
+
+      - name: Install project dependencies
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          python -m pip install --upgrade pip setuptools wheel
+
+          if [ -f requirements.txt ]; then
+            echo "Installing requirements.txt"
+            python -m pip install -r requirements.txt
+          fi
+
+          if [ -f requirements-dev.txt ]; then
+            echo "Installing requirements-dev.txt"
+            python -m pip install -r requirements-dev.txt
+          fi
+
+          if [ -f pyproject.toml ]; then
+            echo "Installing project"
+            python -m pip install -e .
+          fi
+
+          python -m pip install \
+            pytest \
+            pytest-cov \
+            ruff \
+            pip-audit
+
+
+      # ==========================================================
+      # 5. PROJECT STRUCTURE
+      # ==========================================================
+
+      - name: Validate project structure
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking SentinelShield structure..."
+
+          test -d src || {
+            echo "FAIL: src/ directory missing"
+            exit 1
+          }
+
+          test -d tests || {
+            echo "FAIL: tests/ directory missing"
+            exit 1
+          }
+
+          echo "PASS: src/"
+          echo "PASS: tests/"
+
+          if [ -f pyproject.toml ]; then
+            echo "PASS: pyproject.toml"
+          fi
+
+          if [ -f requirements.txt ]; then
+            echo "PASS: requirements.txt"
+          fi
+
+
+      # ==========================================================
+      # 6. DISCOVER SOURCE
+      # ==========================================================
+
+      - name: Discover source files
+        run: |
+          echo "========== SOURCE FILES =========="
+
+          find src \
+            -type f \
+            -name "*.py" \
+            -print \
+            | sort
+
+
+      # ==========================================================
+      # 7. DISCOVER TESTS
+      # ==========================================================
+
+      - name: Discover tests
+        run: |
+          echo "========== TEST FILES =========="
+
+          find tests \
+            -type f \
+            \( \
+              -name "test_*.py" \
+              -o \
+              -name "*_test.py" \
+            \) \
+            -print \
+            | sort
+
+
+      # ==========================================================
+      # 8. PYTHON COMPILE CHECK
+      # ==========================================================
+
+      - name: Compile Python source
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          python -m compileall -q src
+
+          echo "PASS: Python compilation"
+
+
+      # ==========================================================
+      # 9. RUFF STATIC ANALYSIS
+      # ==========================================================
+
+      - name: Static code analysis
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          ruff check src tests
+
+
+      # ==========================================================
+      # 10. SECURITY - EVAL / EXEC
+      # ==========================================================
+
+      - name: Security scan - dynamic execution
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking eval()/exec()..."
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            --exclude='*.lock' \
+            '(^|[^A-Za-z0-9_])(eval|exec)[[:space:]]*\(' \
+            src tests; then
+
+            echo
+            echo "FAIL: eval()/exec() detected."
+            exit 1
+          fi
+
+          echo "PASS: No eval()/exec() detected."
+
+
+      # ==========================================================
+      # 11. SECURITY - SECRETS
+      # ==========================================================
+
+      - name: Security scan - hard coded secrets
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking possible hard-coded secrets..."
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            --exclude='*.lock' \
+            --exclude='*.md' \
+            'AKIA[0-9A-Z]{16}|BEGIN[[:space:]]+[A-Z ]*PRIVATE KEY|password[[:space:]]*=[[:space:]]*["'\'']|secret[[:space:]]*=[[:space:]]*["'\'']|token[[:space:]]*=[[:space:]]*["'\'']' \
+            src tests; then
+
+            echo
+            echo "FAIL: Possible hard-coded secret."
+            exit 1
+          fi
+
+          echo "PASS: No obvious hard-coded secrets."
+
+
+      # ==========================================================
+      # 12. SECURITY - COMMAND EXECUTION
+      # ==========================================================
+
+      - name: Security scan - command execution
+        shell: bash
+        run: |
+          echo "Checking command execution APIs..."
+
+          FOUND=0
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            'os\.system[[:space:]]*\(' \
+            src; then
+            FOUND=1
+          fi
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            'subprocess\.(run|Popen|call|check_call|check_output)[[:space:]]*\(' \
+            src; then
+            FOUND=1
+          fi
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo
+            echo "WARNING: command execution API detected."
+            echo "This requires SentinelShield task-level review."
+          else
+            echo "PASS: No obvious command execution API."
+          fi
+
+
+      # ==========================================================
+      # 13. SECURITY - NETWORK / DOWNLOAD
+      # ==========================================================
+
+      - name: Security scan - network operations
+        shell: bash
+        run: |
+          echo "Checking network/download APIs..."
+
+          FOUND=0
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            'requests\.(get|post|put|delete|request)[[:space:]]*\(' \
+            src; then
+            FOUND=1
+          fi
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            'urllib\.request|httpx\.|aiohttp\.' \
+            src; then
+            FOUND=1
+          fi
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo
+            echo "WARNING: network operation detected."
+            echo "SentinelShield task-level review required."
+          else
+            echo "PASS: No obvious network operation."
+          fi
+
+
+      # ==========================================================
+      # 14. DEPENDENCY AUDIT
+      # ==========================================================
+
+      - name: Dependency vulnerability audit
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          pip-audit \
+            --local \
+            --format columns
+
+
+      # ==========================================================
+      # 15. CHECK GIT STATUS
+      # ==========================================================
+
+      - name: Check repository state
+        shell: bash
+        run: |
+          echo "========== GIT STATUS =========="
+
+          git status --short
+
+          echo
+          echo "Repository state inspected."
+
+
+      # ==========================================================
+      # 16. CHECK WORKFLOW FILES
+      # ==========================================================
+
+      - name: Inspect GitHub workflows
+        shell: bash
+        run: |
+          echo "========== WORKFLOWS =========="
+
+          if [ -d .github/workflows ]; then
+            find .github/workflows \
+              -type f \
+              -maxdepth 1 \
+              -print \
+              | sort
+
+            echo
+            echo "Workflow files detected."
+          else
+            echo "No .github/workflows directory."
+          fi
+
+
+      # ==========================================================
+      # 17. PYTEST - COLLECT
+      # ==========================================================
+
+      - name: Collect tests
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          PYTHONPATH=src \
+            python -m pytest \
+            --collect-only \
+            -q
+
+
+      # ==========================================================
+      # 18. TARGETED / COMPLETE TEST SUITE
+      # ==========================================================
+
+      - name: Run complete test suite
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          PYTHONPATH=src \
+            python -m pytest \
+            -q \
+            --tb=short
+
+
+      # ==========================================================
+      # 19. COVERAGE
+      # ==========================================================
+
+      - name: Run coverage validation
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          PYTHONPATH=src \
+            python -m pytest \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            -q
+
+
+      # ==========================================================
+      # 20. BUILD / PACKAGE CHECK
+      # ==========================================================
+
+      - name: Validate Python package build
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          if [ -f pyproject.toml ]; then
+            python -m pip install build
+            python -m build --wheel --sdist
+            echo "PASS: Package build completed."
+          else
+            echo "SKIP: pyproject.toml not present."
+          fi
+
+
+      # ==========================================================
+      # 21. TASK DOCUMENTATION CHECK
+      # ==========================================================
+
+      - name: Check task specification files
+        shell: bash
+        run: |
+          echo "========== TASK SPECIFICATION CHECK =========="
+
+          FOUND=0
+
+          for directory in \
+            docs \
+            specifications \
+            specs \
+            tasks \
+            task-specs \
+            .github; do
+
+            if [ -d "$directory" ]; then
+
+              if grep -RIlE \
+                'Məqsəd|Purpose|Input|Output|PASS|FAIL|Dependency|Security rule' \
+                "$directory" \
+                2>/dev/null; then
+
+                FOUND=1
+              fi
+
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "PASS: Task specification material detected."
+          else
+            echo "WARNING: No standard task specification detected."
+            echo "Task-specific semantic validation requires a task specification."
+          fi
+
+
+      # ==========================================================
+      # 22. FILESYSTEM SAFETY CHECK
+      # ==========================================================
+
+      - name: Filesystem safety scan
+        shell: bash
+        run: |
+          echo "Checking suspicious filesystem operations..."
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            'shutil\.rmtree|os\.remove|os\.unlink|Path\(.*\)\.unlink|Path\(.*\)\.rmdir' \
+            src; then
+
+            echo
+            echo "WARNING: Destructive filesystem API detected."
+            echo "SentinelShield task-level safety review required."
+          else
+            echo "PASS: No obvious destructive filesystem operation."
+          fi
+
+
+      # ==========================================================
+      # 23. PERMISSION / PRIVILEGE CHECK
+      # ==========================================================
+
+      - name: Privilege escalation scan
+        shell: bash
+        run: |
+          echo "Checking privilege-related operations..."
+
+          if grep -RInE \
+            --exclude-dir=.git \
+            --exclude-dir=.sentinelshield-ci \
+            'sudo[[:space:]]|setuid|setgid|chmod[[:space:]]*\(|chown[[:space:]]*\(' \
+            src; then
+
+            echo
+            echo "WARNING: Privilege-related operation detected."
+            echo "SentinelShield security review required."
+          else
+            echo "PASS: No obvious privilege escalation operation."
+          fi
+
+
+      # ==========================================================
+      # 24. IMPORT VALIDATION
+      # ==========================================================
+
+      - name: Import validation
+        shell: bash
+        run: |
+          set -e
+
+          . .sentinelshield-ci/bin/activate
+
+          PYTHONPATH=src python - <<'PY'
+          import pathlib
+          import py_compile
+
+          root = pathlib.Path("src")
+
+          files = sorted(root.rglob("*.py"))
+
+          if not files:
+              raise SystemExit("No Python source files found.")
+
+          for file in files:
+              py_compile.compile(
+                  str(file),
+                  doraise=True
+              )
+
+          print(f"Validated {len(files)} Python source files.")
+          PY
+
+          echo "PASS: Import/compile validation."
+
+
+      # ==========================================================
+      # 25. GENERATE FINAL REPORT
+      # ==========================================================
+
+      - name: Generate SentinelShield report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p sentinelshield-report
+
+          {
+            echo "================================================"
+            echo " SENTINELSHIELD VALIDATION REPORT"
+            echo "================================================"
+            echo
+            echo "Repository : $GITHUB_REPOSITORY"
+            echo "Commit     : $GITHUB_SHA"
+            echo "Branch     : $GITHUB_REF"
+            echo "Runner     : $RUNNER_OS"
+            echo
+            echo "Environment:"
+            echo "GitHub Actions Cloud Runner"
+            echo
+            echo "Checks performed:"
+            echo
+            echo "[1] Repository checkout"
+            echo "[2] Python environment"
+            echo "[3] Isolated CI environment"
+            echo "[4] Dependency installation"
+            echo "[5] Project structure"
+            echo "[6] Source discovery"
+            echo "[7] Test discovery"
+            echo "[8] Python compilation"
+            echo "[9] Static analysis"
+            echo "[10] Dynamic execution security"
+            echo "[11] Secret detection"
+            echo "[12] Command execution detection"
+            echo "[13] Network operation detection"
+            echo "[14] Dependency vulnerability audit"
+            echo "[15] Repository state"
+            echo "[16] GitHub workflow inspection"
+            echo "[17] Test collection"
+            echo "[18] Full regression"
+            echo "[19] Coverage"
+            echo "[20] Package build"
+            echo "[21] Task specification detection"
+            echo "[22] Filesystem safety"
+            echo "[23] Privilege checks"
+            echo "[24] Import validation"
+            echo
+            echo "================================================"
+            echo " END OF REPORT"
+            echo "================================================"
+          } > sentinelshield-report/report.txt
+
+          cat sentinelshield-report/report.txt
+
+
+      # ==========================================================
+      # 26. GITHUB STEP SUMMARY
+      # ==========================================================
+
+      - name: Publish GitHub summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "# SentinelShield Validation"
+            echo
+            echo "## Repository"
+            echo "- Repository: \`$GITHUB_REPOSITORY\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Runner: \`$RUNNER_OS\`"
+            echo
+            echo "## Validation"
+            echo "- Source structure"
+            echo "- Python compilation"
+            echo "- Static analysis"
+            echo "- Security scanning"
+            echo "- Dependency audit"
+            echo "- Test collection"
+            echo "- Full regression"
+            echo "- Coverage"
+            echo "- Package build"
+            echo "- Filesystem safety"
+            echo "- Privilege checks"
+            echo
+            echo "## Environment boundary"
+            echo "Server-side execution performed on GitHub Actions cloud runner."
+            echo
+            echo "Local WSL execution: NOT USED"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+      # ==========================================================
+      # 27. SAVE ARTIFACTS
+      # ==========================================================
+
+      - name: Upload SentinelShield validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinelshield-validation-report
+          path: |
+            sentinelshield-report/
+            coverage.xml
+            dist/
+          if-no-files-found: ignore
+
+
+      # ==========================================================
+      # 28. FINAL STATUS
+      # ==========================================================
+
+      - name: Final SentinelShield status
+        if: always()
+        run: |
+          echo
+          echo "================================================"
+          echo " SENTINELSHIELD VALIDATION FINISHED"
+          echo "================================================"
+          echo
+          echo "Repository : $GITHUB_REPOSITORY"
+          echo "Commit     : $GITHUB_SHA"
+          echo "Environment: GitHub Actions Cloud Runner"
+          echo
+          echo "The workflow result above determines PASS/FAIL."
+          echo
+          echo "================================================"
