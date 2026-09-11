@@ -21,8 +21,10 @@ jobs:
   sentinelshield:
     name: SentinelShield Validator
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -37,66 +39,130 @@ jobs:
           echo " SENTINELSHIELD VALIDATION"
           echo "======================================"
           echo "Repository: $GITHUB_REPOSITORY"
-          echo "Commit:     $GITHUB_SHA"
-          echo "Task:       ${{ github.event.inputs.task || 'all' }}"
+          echo "Commit: $GITHUB_SHA"
+          echo "Task: ${{ github.event.inputs.task || 'all' }}"
           echo "Environment: GitHub Actions Cloud"
           echo
 
-      - name: Install project
+      - name: Create virtual environment
         shell: bash
         run: |
-          set -e
-
           python -m venv .venv
-          source .venv/bin/activate
+
+          . .venv/bin/activate
+
+          python --version
+          python -m pip --version
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          . .venv/bin/activate
 
           python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Install project dependencies
+        shell: bash
+        run: |
+          . .venv/bin/activate
 
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+            python -m pip install -r requirements.txt
           fi
 
           if [ -f requirements-dev.txt ]; then
-            pip install -r requirements-dev.txt
+            python -m pip install -r requirements-dev.txt
           fi
 
           if [ -f pyproject.toml ]; then
-            pip install -e .
+            python -m pip install -e .
           fi
 
-      - name: Find SentinelShield validator
+      - name: Validate project structure
         shell: bash
         run: |
-          echo "Searching for SentinelShield validator..."
+          echo "===== PROJECT STRUCTURE ====="
 
-          find . \
-            -path './.git' -prune -o \
-            -path './.venv' -prune -o \
-            -type f \
-            \( \
-              -iname '*validator*.py' \
-              -o -iname '*validation*.py' \
-              -o -iname '*task*.py' \
-            \) \
-            -print | sort
+          if [ -d src ]; then
+            echo "PASS: src/"
+          else
+            echo "FAIL: src/ directory not found"
+            exit 1
+          fi
+
+          if [ -d tests ]; then
+            echo "PASS: tests/"
+          else
+            echo "FAIL: tests/ directory not found"
+            exit 1
+          fi
 
       - name: Validate Python syntax
+        shell: bash
         run: |
+          . .venv/bin/activate
+
           python -m compileall -q src
+
           echo "PASS: Python syntax"
+
+      - name: Discover SentinelShield source
+        shell: bash
+        run: |
+          echo "===== SOURCE FILES ====="
+
+          find src \
+            -type f \
+            -name "*.py" \
+            | sort
+
+      - name: Discover SentinelShield tests
+        shell: bash
+        run: |
+          echo "===== TEST FILES ====="
+
+          find tests \
+            -type f \
+            \( -name "test_*.py" -o -name "*_test.py" \) \
+            | sort
+
+      - name: Collect tests
+        shell: bash
+        run: |
+          . .venv/bin/activate
+
+          PYTHONPATH=src python -m pytest \
+            --collect-only \
+            -q
 
       - name: Run project tests
         shell: bash
         run: |
-          if [ -d tests ]; then
-            PYTHONPATH=src pytest -q
-          else
-            echo "No tests directory found."
-          fi
+          . .venv/bin/activate
 
-      - name: Run SentinelShield validator
+          PYTHONPATH=src python -m pytest \
+            -q \
+            --tb=short
+
+      - name: Find SentinelShield validator
         shell: bash
         run: |
+          echo "===== SENTINELSHIELD VALIDATOR DISCOVERY ====="
+
+          if [ -f tools/sentinelshield_validator.py ]; then
+            echo "FOUND: tools/sentinelshield_validator.py"
+          elif [ -f src/sentinelshield/validator.py ]; then
+            echo "FOUND: src/sentinelshield/validator.py"
+          else
+            echo "INFO: SentinelShield task validator not installed yet."
+          fi
+
+      - name: Run SentinelShield task validator
+        shell: bash
+        run: |
+          . .venv/bin/activate
+
           TASK="${{ github.event.inputs.task || 'all' }}"
 
           echo "======================================"
@@ -106,6 +172,7 @@ jobs:
           echo
 
           if [ -f tools/sentinelshield_validator.py ]; then
+
             if [ "$TASK" = "all" ]; then
               python tools/sentinelshield_validator.py
             else
@@ -113,23 +180,45 @@ jobs:
             fi
 
           elif [ -f src/sentinelshield/validator.py ]; then
+
             if [ "$TASK" = "all" ]; then
-              python -m sentinelshield.validator
+              PYTHONPATH=src python -m sentinelshield.validator
             else
-              python -m sentinelshield.validator "$TASK"
+              PYTHONPATH=src python -m sentinelshield.validator "$TASK"
             fi
 
           else
-            echo "SentinelShield validator has not been installed yet."
-            echo
-            echo "Workflow structure: PASS"
-            echo "Task validator: WAITING FOR IMPLEMENTATION"
+            echo "INFO: No task validator implementation found."
+            echo "Project tests remain the primary validation."
           fi
 
-      - name: Final result
+      - name: Repository status
         if: always()
+        shell: bash
         run: |
+          echo "===== GIT STATUS ====="
+          git status --short
+
+      - name: Validation summary
+        if: always()
+        shell: bash
+        run: |
+          echo "======================================"
+          echo " SENTINELSHIELD WORKFLOW COMPLETED"
+          echo "======================================"
           echo
-          echo "======================================"
-          echo " SENTINELSHIELD WORKFLOW FINISHED"
-          echo "======================================"
+          echo "Environment: GitHub Actions Cloud"
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Commit: $GITHUB_SHA"
+          echo
+          echo "Validation stages:"
+          echo "  1. Repository checkout"
+          echo "  2. Python environment"
+          echo "  3. Dependencies"
+          echo "  4. Project structure"
+          echo "  5. Python syntax"
+          echo "  6. Source discovery"
+          echo "  7. Test discovery"
+          echo "  8. Test collection"
+          echo "  9. Project tests"
+          echo " 10. SentinelShield validator"
