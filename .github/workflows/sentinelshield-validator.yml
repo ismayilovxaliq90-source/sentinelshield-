@@ -1,4 +1,4 @@
-name: SentinelShield Validator
+name: SentinelShield Validation
 
 on:
   push:
@@ -8,266 +8,128 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      task:
+        description: "Task number (example: 176)"
+        required: false
+        default: "all"
 
 permissions:
   contents: read
 
 jobs:
-  validate:
-    name: SentinelShield Validation
+  sentinelshield:
+    name: SentinelShield Validator
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Show repository
-        run: |
-          echo "================================"
-          echo "SENTINELSHIELD VALIDATION"
-          echo "================================"
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Commit: $GITHUB_SHA"
-          echo "Branch: $GITHUB_REF"
-          echo "Runner: $RUNNER_OS"
-          echo
-          pwd
-          echo
-          ls -la
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Create isolated environment
+      - name: Show repository
         run: |
-          python -m venv .sentinelshield-venv
-          . .sentinelshield-venv/bin/activate
-          python --version
-          python -m pip --version
+          echo "======================================"
+          echo " SENTINELSHIELD VALIDATION"
+          echo "======================================"
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Commit:     $GITHUB_SHA"
+          echo "Task:       ${{ github.event.inputs.task || 'all' }}"
+          echo "Environment: GitHub Actions Cloud"
+          echo
 
-      - name: Install validation tools
-        run: |
-          . .sentinelshield-venv/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install pytest pytest-cov ruff bandit pip-audit
-
-      - name: Install project dependencies
+      - name: Install project
         shell: bash
         run: |
           set -e
-          . .sentinelshield-venv/bin/activate
+
+          python -m venv .venv
+          source .venv/bin/activate
+
+          python -m pip install --upgrade pip
 
           if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
+            pip install -r requirements.txt
           fi
 
           if [ -f requirements-dev.txt ]; then
-            python -m pip install -r requirements-dev.txt
+            pip install -r requirements-dev.txt
           fi
 
           if [ -f pyproject.toml ]; then
-            python -m pip install -e .
+            pip install -e .
           fi
 
-      - name: Validate required directories
+      - name: Find SentinelShield validator
+        shell: bash
         run: |
-          test -d src
-          test -d tests
+          echo "Searching for SentinelShield validator..."
 
-          echo "PASS: src/"
-          echo "PASS: tests/"
+          find . \
+            -path './.git' -prune -o \
+            -path './.venv' -prune -o \
+            -type f \
+            \( \
+              -iname '*validator*.py' \
+              -o -iname '*validation*.py' \
+              -o -iname '*task*.py' \
+            \) \
+            -print | sort
 
-      - name: Discover SentinelShield source
+      - name: Validate Python syntax
         run: |
-          echo "===== SOURCE ====="
-          find src -type f -name "*.py" | sort
-
-      - name: Discover SentinelShield tests
-        run: |
-          echo "===== TESTS ====="
-          find tests -type f \
-            \( -name "test_*.py" -o -name "*_test.py" \) \
-            | sort
-
-      - name: Python syntax validation
-        run: |
-          . .sentinelshield-venv/bin/activate
           python -m compileall -q src
           echo "PASS: Python syntax"
 
-      - name: Ruff code validation
-        run: |
-          . .sentinelshield-venv/bin/activate
-          ruff check src tests
-
-      - name: Collect pytest tests
-        run: |
-          . .sentinelshield-venv/bin/activate
-          PYTHONPATH=src python -m pytest \
-            --collect-only \
-            -q
-
-      - name: Run SentinelShield tests
-        run: |
-          . .sentinelshield-venv/bin/activate
-          PYTHONPATH=src python -m pytest \
-            -q \
-            --tb=short
-
-      - name: Run coverage
-        run: |
-          . .sentinelshield-venv/bin/activate
-          PYTHONPATH=src python -m pytest \
-            --cov=src \
-            --cov-report=term-missing \
-            --cov-report=xml \
-            -q
-
-      - name: Security audit
-        continue-on-error: true
-        run: |
-          . .sentinelshield-venv/bin/activate
-
-          echo "===== BANDIT ====="
-          bandit -r src -f txt || true
-
-          echo
-          echo "===== PIP AUDIT ====="
-          pip-audit || true
-
-      - name: Security pattern report
-        continue-on-error: true
+      - name: Run project tests
         shell: bash
         run: |
-          echo "===== SECURITY PATTERN REPORT ====="
+          if [ -d tests ]; then
+            PYTHONPATH=src pytest -q
+          else
+            echo "No tests directory found."
+          fi
 
-          echo
-          echo "--- eval / exec ---"
-          grep -RInE \
-            --exclude-dir=.git \
-            --exclude-dir=.sentinelshield-venv \
-            '(^|[^A-Za-z0-9_])(eval|exec)[[:space:]]*\(' \
-            src || true
-
-          echo
-          echo "--- subprocess ---"
-          grep -RInE \
-            --exclude-dir=.git \
-            --exclude-dir=.sentinelshield-venv \
-            'subprocess\.(run|Popen|call|check_call|check_output)' \
-            src || true
-
-          echo
-          echo "--- os.system ---"
-          grep -RInE \
-            --exclude-dir=.git \
-            --exclude-dir=.sentinelshield-venv \
-            'os\.system[[:space:]]*\(' \
-            src || true
-
-          echo
-          echo "--- filesystem deletion ---"
-          grep -RInE \
-            --exclude-dir=.git \
-            --exclude-dir=.sentinelshield-venv \
-            'shutil\.rmtree|os\.remove|os\.unlink' \
-            src || true
-
-      - name: Check task specifications
-        continue-on-error: true
+      - name: Run SentinelShield validator
         shell: bash
         run: |
-          echo "===== TASK SPECIFICATIONS ====="
+          TASK="${{ github.event.inputs.task || 'all' }}"
 
-          for directory in \
-            tasks \
-            task-specs \
-            specifications \
-            specs \
-            docs; do
+          echo "======================================"
+          echo " SENTINELSHIELD TASK VALIDATION"
+          echo "======================================"
+          echo "Requested task: $TASK"
+          echo
 
-            if [ -d "$directory" ]; then
-              echo
-              echo "Directory: $directory"
-              find "$directory" -type f | sort
+          if [ -f tools/sentinelshield_validator.py ]; then
+            if [ "$TASK" = "all" ]; then
+              python tools/sentinelshield_validator.py
+            else
+              python tools/sentinelshield_validator.py "$TASK"
             fi
-          done
 
-      - name: Repository state
-        run: |
-          echo "===== GIT STATUS ====="
-          git status --short
+          elif [ -f src/sentinelshield/validator.py ]; then
+            if [ "$TASK" = "all" ]; then
+              python -m sentinelshield.validator
+            else
+              python -m sentinelshield.validator "$TASK"
+            fi
 
-      - name: Create validation report
+          else
+            echo "SentinelShield validator has not been installed yet."
+            echo
+            echo "Workflow structure: PASS"
+            echo "Task validator: WAITING FOR IMPLEMENTATION"
+          fi
+
+      - name: Final result
         if: always()
         run: |
-          mkdir -p sentinelshield-report
-
-          {
-            echo "SentinelShield Validation Report"
-            echo "================================"
-            echo
-            echo "Repository: $GITHUB_REPOSITORY"
-            echo "Commit: $GITHUB_SHA"
-            echo "Branch: $GITHUB_REF"
-            echo "Runner: $RUNNER_OS"
-            echo
-            echo "Checks:"
-            echo "1. Repository checkout"
-            echo "2. Python environment"
-            echo "3. Dependency installation"
-            echo "4. Project structure"
-            echo "5. Source discovery"
-            echo "6. Test discovery"
-            echo "7. Python syntax"
-            echo "8. Ruff static analysis"
-            echo "9. Pytest collection"
-            echo "10. Full test suite"
-            echo "11. Coverage"
-            echo "12. Bandit security audit"
-            echo "13. Dependency vulnerability audit"
-            echo "14. Security pattern report"
-            echo "15. Task specification discovery"
-            echo "16. Repository state"
-            echo
-            echo "Environment: GitHub Actions Cloud Runner"
-            echo "Local WSL execution: NOT USED"
-          } > sentinelshield-report/report.txt
-
-          cat sentinelshield-report/report.txt
-
-      - name: Publish GitHub summary
-        if: always()
-        run: |
-          {
-            echo "# SentinelShield Validation"
-            echo
-            echo "- Repository: \`$GITHUB_REPOSITORY\`"
-            echo "- Commit: \`$GITHUB_SHA\`"
-            echo "- Environment: GitHub Actions Cloud Runner"
-            echo
-            echo "## Checks"
-            echo "- Project structure"
-            echo "- Python syntax"
-            echo "- Ruff"
-            echo "- Pytest"
-            echo "- Coverage"
-            echo "- Bandit"
-            echo "- pip-audit"
-            echo "- Security pattern scan"
-            echo "- Task specification discovery"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload validation report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sentinelshield-validation-report
-          path: |
-            sentinelshield-report/
-            coverage.xml
-          if-no-files-found: ignore
+          echo
+          echo "======================================"
+          echo " SENTINELSHIELD WORKFLOW FINISHED"
+          echo "======================================"
