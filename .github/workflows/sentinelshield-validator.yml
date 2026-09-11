@@ -1,4 +1,4 @@
-name: Dependency Vulnerability Scan
+name: Full Test & Governance Verification Suite
 
 on:
   push:
@@ -15,54 +15,124 @@ permissions:
   issues: write
 
 jobs:
-  python-deps:
-    name: Python Dependency Audit
+  # ---------- 1. UNIT TESTS ----------
+  unit-tests-python:
+    name: Python Unit Tests
     runs-on: ubuntu-latest
-    if: hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/poetry.lock') != ''
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Install pip-audit
-        run: pip install pip-audit
-
-      - name: Run pip-audit
+      - name: Install deps
         run: |
-          pip-audit -r requirements.txt --format json --output pip-audit-report.json || true
-          pip-audit -r requirements.txt
-
-      - name: Upload report
-        uses: actions/upload-artifact@v4
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+      - name: Run unit tests
+        run: pytest tests/unit -v --cov=. --cov-report=xml
+      - uses: actions/upload-artifact@v4
         with:
-          name: pip-audit-report
-          path: pip-audit-report.json
+          name: python-coverage
+          path: coverage.xml
 
-  node-deps:
-    name: Node.js Dependency Audit
+  unit-tests-node:
+    name: Node.js Unit Tests
     runs-on: ubuntu-latest
     if: hashFiles('**/package.json') != ''
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - run: npm ci
+      - run: npm test -- --coverage
 
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
+  # ---------- 2. INTEGRATION TESTS ----------
+  integration-tests:
+    name: Integration Tests (Postgres/Redis/RabbitMQ/Keycloak/Vault)
+    runs-on: ubuntu-latest
+    needs: [ unit-tests-python ]
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Run npm audit
+      - name: Start stack
+        run: docker compose -f docker-compose.yml up -d
+
+      - name: Wait for services
         run: |
+          for i in $(seq 1 30); do
+            docker compose ps --format json | grep -q '"State":"running"' && break
+            sleep 2
+          done
+
+      - name: Run integration test suite
+        run: |
+          pip install -r requirements.txt pytest
+          pytest tests/integration -v
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ---------- 3. DVR PIPELINE FUNCTIONAL TESTS ----------
+  dvr-pipeline-tests:
+    name: DVR Pipeline Task Tests (TASK 1 of 297)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pytest
+
+      - name: Run DVR pipeline test suite
+        run: pytest tests/dvr -v -m "pipeline"
+
+      - name: Symlink escape detection test
+        run: pytest tests/dvr/test_symlink_escape.py -v
+        # NOTE: known gap — symlink escape detection is specified but not
+        # implemented yet; expected to FAIL until fixed.
+
+      - name: Task-count consistency check
+        run: python scripts/verify_task_count.py --expected 297 --source docs/dvr_tasks.md
+
+  # ---------- 4. DEPENDENCY VULNERABILITY SCANS ----------
+  dependency-scan-python:
+    name: pip-audit (Python deps)
+    runs-on: ubuntu-latest
+    if: hashFiles('**/requirements*.txt', '**/pyproject.toml', '**/poetry.lock') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pip-audit
+      - run: |
+          pip-audit -r requirements.txt --format json --output pip-audit-report.json || true
+          pip-audit -r requirements.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+
+  dependency-scan-node:
+    name: npm audit (Node deps)
+    runs-on: ubuntu-latest
+    if: hashFiles('**/package.json') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci --ignore-scripts
+      - run: |
           npm audit --json > npm-audit-report.json || true
           npm audit --audit-level=high
-
-      - name: Upload report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: npm-audit-report
           path: npm-audit-report.json
@@ -73,21 +143,15 @@ jobs:
     if: hashFiles('**/Dockerfile', '**/docker-compose*.yml') != ''
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build image
-        run: docker build -t local/scan-target:${{ github.sha }} .
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@0.24.0
+      - run: docker build -t local/scan-target:${{ github.sha }} .
+      - uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: 'local/scan-target:${{ github.sha }}'
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
-
-      - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+      - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
@@ -100,31 +164,78 @@ jobs:
         language: [ 'python', 'javascript' ]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+  # ---------- 5. UGC INFRA GOVERNANCE CHECKS ----------
+  ugc-governance-checks:
+    name: UGC Infra Governance Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+      - name: Fail if Redis has no auth configured
+        run: |
+          if ! grep -q "requirepass" docker-compose.yml && ! grep -q "REDIS_PASSWORD" docker-compose.yml; then
+            echo "::error::Redis is running without authentication."
+            exit 1
+          fi
 
+      - name: Fail if Keycloak image tag is unpinned (latest)
+        run: |
+          if grep -E "keycloak/keycloak:(latest)?\"?$" docker-compose.yml; then
+            echo "::error::Keycloak image is pinned to 'latest' or unpinned."
+            exit 1
+          fi
+
+      - name: Fail if container resource limits are missing
+        run: python scripts/check_resource_limits.py docker-compose.yml
+
+      - name: Fail if Human Review Gate is missing
+        run: |
+          if ! grep -qi "human review gate" docs/implementation_plan.md; then
+            echo "::error::Human Review Gate step is missing from the implementation plan."
+            exit 1
+          fi
+
+      - name: Cross-check implementation-plan day counts (35-day vs 120-day)
+        run: python scripts/check_plan_consistency.py docs/*.md
+
+  # ---------- 6. FINAL GATE ----------
   summary:
-    name: Aggregate & Fail-Gate
-    needs: [ python-deps, node-deps, container-scan, codeql ]
+    name: Aggregate All Results
+    needs:
+      - unit-tests-python
+      - unit-tests-node
+      - integration-tests
+      - dvr-pipeline-tests
+      - dependency-scan-python
+      - dependency-scan-node
+      - container-scan
+      - codeql
+      - ugc-governance-checks
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Check job results
+      - name: Report status of every job
         run: |
-          echo "python-deps: ${{ needs.python-deps.result }}"
-          echo "node-deps: ${{ needs.node-deps.result }}"
+          echo "unit-tests-python: ${{ needs.unit-tests-python.result }}"
+          echo "unit-tests-node: ${{ needs.unit-tests-node.result }}"
+          echo "integration-tests: ${{ needs.integration-tests.result }}"
+          echo "dvr-pipeline-tests: ${{ needs.dvr-pipeline-tests.result }}"
+          echo "dependency-scan-python: ${{ needs.dependency-scan-python.result }}"
+          echo "dependency-scan-node: ${{ needs.dependency-scan-node.result }}"
           echo "container-scan: ${{ needs.container-scan.result }}"
           echo "codeql: ${{ needs.codeql.result }}"
-          if [[ "${{ needs.container-scan.result }}" == "failure" ]]; then
-            echo "::error::Critical/High vulnerabilities found in container image."
-            exit 1
-          fi
+          echo "ugc-governance-checks: ${{ needs.ugc-governance-checks.result }}"
+      - name: Fail overall if any required job failed
+        run: |
+          for r in "${{ needs.unit-tests-python.result }}" "${{ needs.integration-tests.result }}" "${{ needs.container-scan.result }}" "${{ needs.ugc-governance-checks.result }}"; do
+            if [[ "$r" == "failure" ]]; then
+              echo "::error::One or more required checks failed."
+              exit 1
+            fi
+          done
