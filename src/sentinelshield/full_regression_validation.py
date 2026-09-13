@@ -1,0 +1,63 @@
+from dataclasses import dataclass
+from pathlib import Path
+import subprocess
+
+__test__ = False
+
+@dataclass(frozen=True)
+class FullRegressionValidationInput:
+    project_root: Path
+    command: tuple[str, ...]
+    timeout: int = 1800
+
+@dataclass(frozen=True)
+class FullRegressionValidationResult:
+    command: tuple[str, ...]
+    return_code: int | None
+    success: bool
+    timed_out: bool
+    stdout: str
+    stderr: str
+    status: str
+
+def validate_full_regression(request):
+    if not isinstance(request, FullRegressionValidationInput):
+        raise TypeError("INPUT_MUST_BE_FULL_REGRESSION_VALIDATION_INPUT")
+    if not isinstance(request.project_root, Path) or not request.project_root.is_dir():
+        raise ValueError("PROJECT_ROOT_MUST_BE_EXISTING_DIRECTORY")
+    if not isinstance(request.command, tuple) or not request.command:
+        raise TypeError("COMMAND_MUST_BE_NON_EMPTY_TUPLE")
+    if any(not isinstance(x, str) or not x.strip() for x in request.command):
+        raise TypeError("COMMAND_ITEMS_MUST_BE_NON_EMPTY_STRINGS")
+    if not isinstance(request.timeout, int) or isinstance(request.timeout, bool) or request.timeout <= 0:
+        raise ValueError("TIMEOUT_MUST_BE_POSITIVE_INTEGER")
+    try:
+        p = subprocess.run(
+            request.command,
+            cwd=request.project_root,
+            capture_output=True,
+            text=True,
+            timeout=request.timeout,
+        )
+        return FullRegressionValidationResult(
+            request.command,
+            p.returncode,
+            p.returncode == 0,
+            False,
+            p.stdout,
+            p.stderr,
+            "PASS" if p.returncode == 0 else "FAIL",
+        )
+    except subprocess.TimeoutExpired as e:
+        return FullRegressionValidationResult(
+            request.command,
+            None,
+            False,
+            True,
+            e.stdout or "",
+            e.stderr or "",
+            "TIMEOUT",
+        )
+
+def full_regression_validation(request):
+    return validate_full_regression(request)
