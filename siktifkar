@@ -1,0 +1,78 @@
+name: SentinelShield - All Task Validations
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  all-task-validations:
+    name: Run All Task Validation Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run every task validation script
+        id: tasks
+        run: |
+          set +e
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+          FAILED=0
+          FAILED_TASKS=""
+          for script in $(ls scripts/task_*.py 2>/dev/null | sort -V); do
+            echo "=================================================="
+            echo "Running: $script"
+            echo "=================================================="
+            python "$script"
+            code=$?
+            if [ $code -ne 0 ]; then
+              FAILED=1
+              FAILED_TASKS="$FAILED_TASKS $script"
+              echo "RESULT: FAIL ($script)"
+            else
+              echo "RESULT: PASS ($script)"
+            fi
+          done
+          echo "failed_tasks=$FAILED_TASKS" >> "$GITHUB_OUTPUT"
+          echo "overall_failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+      - name: Run full pytest suite
+        run: |
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+          pytest tests/ -v
+
+      - name: Fail job if any task script failed
+        if: steps.tasks.outputs.overall_failed == '1'
+        run: |
+          echo "::error::One or more task scripts failed:${{ steps.tasks.outputs.failed_tasks }}"
+          exit 1
